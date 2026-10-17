@@ -1,3 +1,7 @@
+import { passesLuhn } from '../cardNumber.js';
+
+export { passesLuhn };
+
 /**
  * Two-layer redaction applied to everything the logger writes.
  * See docs/08-error-handling.md §8.7.
@@ -29,19 +33,6 @@ const PATTERNS: Array<[RegExp, string | ((match: string, ...groups: string[]) =>
   [/Bearer\s+[^\s"',;]+/gi, 'Bearer [REDACTED]'],
   [/\bv\d+:[A-Za-z0-9+/=]+:[A-Za-z0-9+/=]+:[A-Za-z0-9+/=]*/g, '[REDACTED_CIPHERTEXT]'],
 ];
-
-export function passesLuhn(digits: string): boolean {
-  let sum = 0;
-  for (let i = 0; i < digits.length; i++) {
-    let digit = digits.charCodeAt(digits.length - 1 - i) - 48;
-    if (i % 2 === 1) {
-      digit *= 2;
-      if (digit > 9) digit -= 9;
-    }
-    sum += digit;
-  }
-  return sum % 10 === 0;
-}
 
 export function redactString(input: string): string {
   let out = input;

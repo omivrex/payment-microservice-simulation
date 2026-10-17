@@ -1,3 +1,4 @@
+import { cards } from './cards.ts';
 import { foundation } from './foundation.ts';
 import { startSmokeServer, type SmokeContext } from './harness.ts';
 import { merchants } from './merchants.ts';
@@ -13,6 +14,7 @@ import { ratelimits } from './ratelimits.ts';
 const SCENARIOS: Record<string, (s: SmokeContext) => Promise<void>> = {
   foundation,
   merchants,
+  cards,
   ratelimits,
 };
 

@@ -12,4 +12,8 @@ export interface RouteDeps {
     /** Secret or publishable key. */
     any: RequestHandler[];
   };
+  /** Idempotency-Key support for mutating POST routes (place after auth). */
+  idempotency: RequestHandler;
+  /** POST /tokens per-key limiter (shared instance). */
+  tokensLimiter: RequestHandler;
 }

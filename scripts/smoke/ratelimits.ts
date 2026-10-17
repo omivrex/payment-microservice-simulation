@@ -31,5 +31,19 @@ export async function ratelimits(s: SmokeContext): Promise<void> {
     }
     s.check('per-key general limit → 429 after the configured budget', blocked, { calls });
   }
+
+  const pk = s.state.merchant?.pk as string | undefined;
+  if (pk) {
+    let tokenCalls = 0;
+    let tokenBlocked = false;
+    while (!tokenBlocked && tokenCalls < 1000) {
+      const batch = await Promise.all(
+        Array.from({ length: 25 }, () => s.call('POST', '/tokens', { key: pk, body: { card: { number: '4242424242424242', expMonth: 12, expYear: 2030, cvc: '123' } } })),
+      );
+      tokenCalls += batch.length;
+      tokenBlocked = batch.some((r) => r.status === 429);
+    }
+    s.check('POST /tokens per-key limit (card-testing protection) → 429', tokenBlocked, { tokenCalls });
+  }
   await s.assertAlive('rate-limit floods');
 }

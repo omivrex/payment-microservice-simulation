@@ -20,7 +20,7 @@ Authorization: Bearer sk_test_…   (or pk_test_… where allowed)
 
 ### Idempotency
 
-Endpoints marked **⟳ idempotent** accept an optional `Idempotency-Key` header (1–255 chars):
+Endpoints marked **⟳ idempotent** accept an optional `Idempotency-Key` header (1–255 visible ASCII characters):
 
 | Situation | Response |
 |---|---|
@@ -31,7 +31,7 @@ Endpoints marked **⟳ idempotent** accept an optional `Idempotency-Key` header 
 | Same key, but the first request's reservation is over 60 s old and never completed | Treated as **abandoned**: the request runs normally |
 | First request failed with a **5xx** | **Not stored**: the key is released, so a retry runs again (see [Error handling §8.11](08-error-handling.md#811-errors-and-idempotency)) |
 
-Keys are scoped per merchant **and** per endpoint.
+Keys are scoped per merchant **and** per request path (e.g. `/payments/pay_123/refund`). **Why the full path rather than the endpoint pattern:** with a pattern, the same key used to refund two *different* payments would collide, and the second refund would replay the first one's response.
 
 **Why:** if a network timeout hides the response to `POST /payments`, the client doesn't know whether the customer was charged. Retrying with the same key is guaranteed not to charge twice.
 

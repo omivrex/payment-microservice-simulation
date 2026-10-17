@@ -7,14 +7,17 @@ import type { Hasher } from './crypto/hashing.js';
 import type { JsonDb } from './db/jsonDb.js';
 import { requireKey } from './http/middleware/auth.js';
 import { errorHandler, notFound } from './http/middleware/errorHandler.js';
-import { generalLimiter } from './http/middleware/rateLimit.js';
+import { idempotency } from './http/middleware/idempotency.js';
+import { generalLimiter, tokensLimiter } from './http/middleware/rateLimit.js';
 import { accessLog, requestContext } from './http/middleware/requestContext.js';
 import { buildOpenApiDocument, type OpenApiModule } from './http/openapi.js';
 import type { RouteDeps } from './http/routeDeps.js';
 import type { Logger } from './logging/logger.js';
 import { apiKeysOpenApi, apiKeysRouter } from './modules/apiKeys/routes.js';
 import { healthOpenApi, healthRouter } from './modules/health/routes.js';
+import { cardsOpenApi, cardsRouter } from './modules/cards/routes.js';
 import { merchantsOpenApi, merchantsRouter } from './modules/merchants/routes.js';
+import { tokensOpenApi, tokensRouter } from './modules/tokens/routes.js';
 import { createServices, type Services } from './services.js';
 
 /** Infrastructure every module needs. Built in server.ts (or by tests). */
@@ -42,12 +45,16 @@ export function createApp(ctx: AppContext, services: Services = createServices(c
       secret: [requireKey(services.apiKeys, ['secret']), general],
       any: [requireKey(services.apiKeys, ['secret', 'publishable']), general],
     },
+    idempotency: idempotency(ctx.db, ctx.clock),
+    tokensLimiter: tokensLimiter(ctx.config.rateLimits.tokensPerMinute),
   };
 
   const modules: Array<{ router: Router; openapi: OpenApiModule }> = [
     { router: healthRouter(), openapi: healthOpenApi },
     { router: merchantsRouter(deps), openapi: merchantsOpenApi },
     { router: apiKeysRouter(deps), openapi: apiKeysOpenApi },
+    { router: tokensRouter(deps), openapi: tokensOpenApi },
+    { router: cardsRouter(deps), openapi: cardsOpenApi },
   ];
   const openapi = buildOpenApiDocument(modules.map((m) => m.openapi));
 
