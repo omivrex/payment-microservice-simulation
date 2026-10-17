@@ -149,6 +149,7 @@ All configuration comes from environment variables. The service **refuses to sta
 | `WEBHOOK_ALLOW_INSECURE_URLS` | no | `false` | Allow `http://` and private/loopback webhook URLs (local development only) |
 | `RETENTION_DAYS` | no | `7` | How long completed jobs, events and deliveries are kept |
 | `DB_WARN_SIZE_MB` | no | `20` | Log a warning when the database file outgrows the design capacity (see [Persistence §7.9](07-persistence.md#79-performance-and-capacity)) |
+| `LOG_LEVEL` | no | `info` | Minimum log level: `debug`, `info`, `warn`, `error`, `fatal` (see [Error handling §8.6](08-error-handling.md#86-server-logging)) |
 
 **Why fail fast on startup:** a payment service running with a missing encryption key would either crash on the first card, or worse, store data it can never decrypt. Failing at boot makes a misconfiguration obvious right away.
 
@@ -164,6 +165,9 @@ payment-service/
 │   ├── app.ts                  builds the Express app (no listen, so tests can use it)
 │   ├── config.ts               reads and validates environment variables
 │   ├── errors.ts               AppError hierarchy → HTTP status codes
+│   ├── logging/
+│   │   ├── logger.ts           the only code that writes to the console
+│   │   └── redact.ts           key- and pattern-based redaction
 │   ├── crypto/
 │   │   ├── encryption.ts       AES-256-GCM with key versions + AAD
 │   │   └── hashing.ts          HMAC helpers, constant-time compare, key generation
@@ -202,10 +206,13 @@ Every error response has the same shape:
   "error": {
     "code": "validation_error",
     "message": "Invalid request",
-    "details": [{ "field": "amount", "message": "must be a positive integer" }]
+    "details": [{ "field": "amount", "message": "must be a positive integer" }],
+    "requestId": "req_1b7f0c9e2d4a4f3b8c6d5e7f9a0b1c2d"
   }
 }
 ```
+
+How errors are classified, logged and kept free of sensitive data is covered in [Error handling](08-error-handling.md).
 
 | Status | `code` | When |
 |---|---|---|
@@ -214,9 +221,13 @@ Every error response has the same shape:
 | 403 | `forbidden` | Valid key, wrong type (e.g. a publishable key calling `/payments`) |
 | 404 | `not_found` | The resource doesn't exist **or belongs to another merchant** |
 | 409 | `invalid_state`, `idempotency_in_progress`, `conflict` | Not allowed in the current state |
+| 413 | `payload_too_large` | Request body over 100 kb |
 | 422 | `idempotency_key_reused` | Same `Idempotency-Key` sent with a different request body |
-| 429 | `rate_limited` | Too many requests |
-| 500 | `internal_error` | Unexpected failure (details are logged, never returned) |
+| 429 | `rate_limited` | Too many requests. Includes `Retry-After` |
+| 500 | `internal_error` | Unexpected failure: a bug or a security event. Details are logged, never returned |
+| 503 | `service_unavailable` | Temporary storage failure, nothing was changed. Includes `Retry-After` |
+
+**Why every error includes `requestId`:** a client can quote it, and one search of the server logs finds the full story of that request (see [Error handling §8.5](08-error-handling.md#85-request-ids)).
 
 **Why 404 (not 403) for another merchant's resource:** a 403 would confirm that the ID exists. Returning 404 means one merchant can't discover anything about another merchant's data.
 

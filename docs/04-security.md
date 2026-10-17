@@ -251,9 +251,11 @@ Never logged:
 - request or response bodies of `/tokens`, `/cards`, `/payments` (they may contain card numbers), `/merchants` and `/api-keys/rotate` (they contain new keys), and `/webhooks` creation and rotation (they contain signing secrets);
 - decrypted values of any kind.
 
-Logged: method, path, status, duration, `merchantId`, key **ID** (not the key), and request ID.
+Logged: method, route pattern, status, duration, `merchantId`, key **ID** (not the key), and request ID. 5xx errors also log the redacted error and its stack.
 
 **Why an allow-list of fields instead of trying to strip secrets:** stripping depends on knowing every place a secret can appear, and forgetting one leaks it. Logging only known-safe fields fails safe.
+
+**And redaction as a safety net anyway:** secrets sometimes end up where nobody expected, such as inside a third-party exception message. Every value written to the log first goes through `redact()`, which masks sensitive keys and anything that *looks like* a key, webhook secret, card number or ciphertext, including inside error messages and stack traces. Error responses never contain exception messages or echoed input. See [Error handling §8.4](08-error-handling.md#84-what-the-client-receives) and [§8.7](08-error-handling.md#87-redaction-the-safety-net).
 
 ## 4.11 File permissions
 

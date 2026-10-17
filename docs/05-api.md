@@ -28,6 +28,7 @@ Endpoints marked **⟳ idempotent** accept an optional `Idempotency-Key` header 
 | Same key, same body | The **stored response is replayed**, with header `Idempotent-Replayed: true` |
 | Same key, different body | `422 idempotency_key_reused` |
 | Same key while the first request is still running | `409 idempotency_in_progress` |
+| First request failed with a **5xx** | **Not stored**: the key is released, so a retry runs again (see [Error handling §8.11](08-error-handling.md#811-errors-and-idempotency)) |
 
 Keys are scoped per merchant **and** per endpoint.
 
@@ -47,7 +48,7 @@ List endpoints accept `limit` (1–100, default 20) and `offset` (≥ 0, default
 
 ### Errors
 
-See the [error model in Architecture](01-architecture.md#18-error-model). Every error looks like `{ "error": { "code", "message", "details?" } }`.
+See the [error model in Architecture](01-architecture.md#18-error-model). Every error looks like `{ "error": { "code", "message", "details?", "requestId" } }`, and every response carries an `X-Request-Id` header. `429` and `503` responses include `Retry-After` (in seconds). For what clients can and can't expect from error bodies, see [Error handling §8.4](08-error-handling.md#84-what-the-client-receives).
 
 ## 5.2 Endpoint index
 
