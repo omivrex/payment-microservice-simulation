@@ -224,11 +224,13 @@ Rules, checked when an endpoint is **registered** and again **before every deliv
 1. The scheme must be `https`.
 2. The hostname is resolved, and **every** resulting IP must be public. Rejected: loopback (`127.0.0.0/8`, `::1`), private (`10/8`, `172.16/12`, `192.168/16`, `fc00::/7`), link-local (`169.254/16`, `fe80::/10`), `0.0.0.0`, and multicast. IPv4 addresses written in other forms are normalised before checking, e.g. IPv4-mapped IPv6 (`::ffff:127.0.0.1`) and numeric forms (`2130706433`, `0x7f.1`), since all of these reach the same loopback address.
 3. Redirects are **not followed**. A 3xx response counts as a failed attempt.
+3a. URLs containing credentials (`https://user:pass@…`) are rejected, since they would put a secret in stored configuration and logs.
+3b. Also blocked: carrier-grade NAT (`100.64/10`), documentation/test ranges, NAT64 (`64:ff9b::/96`) and reserved ranges.
 4. Timeout of 10 s, and response bodies are ignored beyond 1 KB.
 
 | Decision | Why |
 |---|---|
-| Check again at delivery time | DNS can change after registration (*DNS rebinding*): a hostname that pointed to a public IP can later point to an internal one |
+| Check again at delivery time, **inside the HTTP client's DNS lookup** | DNS can change after registration (*DNS rebinding*). Checking inside the lookup means the address that was checked is exactly the address that gets connected to. A separate "check, then connect" step would leave a window in which DNS could change again |
 | Don't follow redirects | A public URL could redirect to an internal one, bypassing rule 2 |
 | `WEBHOOK_ALLOW_INSECURE_URLS=true` to relax rules 1–2 | Local development needs `http://localhost:4000/webhooks`. It's an explicit opt-in, so it can't be turned on by accident |
 

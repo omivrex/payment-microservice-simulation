@@ -16,6 +16,7 @@ import { createSimulatedProcessor } from '../../src/processor/simulatedProcessor
 import { createServices, type Services } from '../../src/services.ts';
 import type { BackgroundLoop } from '../../src/workers/background.ts';
 import { createPaymentWorker } from '../../src/workers/paymentWorker.ts';
+import { createWebhookDispatcher, type DispatcherOptions } from '../../src/workers/webhookDispatcher.ts';
 import { testConfig } from './config.ts';
 import { FakeClock } from './fakeClock.ts';
 import { findLeaks, registerSecret } from './leakGuard.ts';
@@ -42,6 +43,9 @@ export interface TestApp {
   clock: FakeClock;
   dir: string;
   worker: BackgroundLoop;
+  dispatcher: BackgroundLoop;
+  /** One dispatcher pass, then wait for the deliveries it started. */
+  runDispatcher(): Promise<void>;
   /** One worker pass, then wait for the jobs it started. */
   runWorker(): Promise<void>;
   /** Runs worker passes until no job is due at the current (fake) time. */
@@ -51,7 +55,7 @@ export interface TestApp {
 }
 
 export async function startTestApp(
-  options: { config?: Partial<Config>; buildContext?: (ctx: AppContext) => AppContext; processor?: Processor } = {},
+  options: { config?: Partial<Config>; buildContext?: (ctx: AppContext) => AppContext; processor?: Processor; dispatcher?: DispatcherOptions } = {},
 ): Promise<TestApp> {
   const dir = await mkdtemp(path.join(tmpdir(), 'payment-service-test-'));
   const config = testConfig({ dbFile: path.join(dir, 'db.json'), ...options.config });
@@ -72,6 +76,11 @@ export async function startTestApp(
   const services = createServices(ctx);
   const processor = options.processor ?? createSimulatedProcessor({ latencyMs: 0, failureRate: 0, clock });
   const worker = createPaymentWorker(ctx, services, processor);
+  const dispatcher = createWebhookDispatcher(ctx, { ...(ctx.resolveHost ? { resolver: ctx.resolveHost } : {}), ...options.dispatcher });
+  const runDispatcher = async () => {
+    await dispatcher.tickOnce();
+    await dispatcher.whenIdle();
+  };
   const runWorker = async () => {
     await worker.tickOnce();
     await worker.whenIdle();
@@ -118,11 +127,14 @@ export async function startTestApp(
     clock,
     dir,
     worker,
+    dispatcher,
+    runDispatcher,
     runWorker,
     settle,
     api,
     async close() {
       await worker.stop();
+      await dispatcher.stop();
       server.closeAllConnections();
       await new Promise<void>((resolve) => server.close(() => resolve()));
       await db.close();

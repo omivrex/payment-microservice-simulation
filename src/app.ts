@@ -19,6 +19,9 @@ import { cardsOpenApi, cardsRouter } from './modules/cards/routes.js';
 import { merchantsOpenApi, merchantsRouter } from './modules/merchants/routes.js';
 import { paymentsOpenApi, paymentsRouter } from './modules/payments/routes.js';
 import { tokensOpenApi, tokensRouter } from './modules/tokens/routes.js';
+import { eventsOpenApi, eventsRouter } from './modules/events/routes.js';
+import type { HostResolver } from './modules/webhooks/ssrf.js';
+import { webhooksOpenApi, webhooksRouter } from './modules/webhooks/routes.js';
 import { createServices, type Services } from './services.js';
 
 /** Infrastructure every module needs. Built in server.ts (or by tests). */
@@ -29,6 +32,8 @@ export interface AppContext {
   clock: Clock;
   encryptor: Encryptor;
   hasher: Hasher;
+  /** DNS resolution for webhook URL checks; injectable for tests (default: system DNS). */
+  resolveHost?: HostResolver;
 }
 
 /** Builds the Express app. No listening, no timers, so tests can use it freely (docs/01-architecture.md §1.7). */
@@ -57,6 +62,8 @@ export function createApp(ctx: AppContext, services: Services = createServices(c
     { router: tokensRouter(deps), openapi: tokensOpenApi },
     { router: cardsRouter(deps), openapi: cardsOpenApi },
     { router: paymentsRouter(deps), openapi: paymentsOpenApi },
+    { router: webhooksRouter(deps), openapi: webhooksOpenApi },
+    { router: eventsRouter(deps), openapi: eventsOpenApi },
   ];
   const openapi = buildOpenApiDocument(modules.map((m) => m.openapi));
 

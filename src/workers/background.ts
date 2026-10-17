@@ -2,6 +2,7 @@ import type { AppContext } from '../app.js';
 import { createSimulatedProcessor } from '../processor/simulatedProcessor.js';
 import type { Services } from '../services.js';
 import { createPaymentWorker } from './paymentWorker.js';
+import { createWebhookDispatcher } from './webhookDispatcher.js';
 
 /** A background loop (payment worker, webhook dispatcher, housekeeping). */
 export interface BackgroundLoop {
@@ -80,7 +81,10 @@ export function startBackgroundLoops(ctx: AppContext, services: Services): Backg
     failureRate: ctx.config.processorFailureRate,
     clock: ctx.clock,
   });
-  const loops: BackgroundLoop[] = [createPaymentWorker(ctx, services, processor)];
+  const loops: BackgroundLoop[] = [
+    createPaymentWorker(ctx, services, processor),
+    createWebhookDispatcher(ctx, ctx.resolveHost ? { resolver: ctx.resolveHost } : {}),
+  ];
   for (const loop of loops) loop.start();
   return loops;
 }

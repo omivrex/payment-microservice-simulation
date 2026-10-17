@@ -4,6 +4,7 @@ import { startSmokeServer, type SmokeContext } from './harness.ts';
 import { merchants } from './merchants.ts';
 import { payments } from './payments.ts';
 import { ratelimits } from './ratelimits.ts';
+import { webhooks } from './webhooks.ts';
 
 /**
  * Smoke tests against the real running server.
@@ -17,6 +18,7 @@ const SCENARIOS: Record<string, (s: SmokeContext) => Promise<void>> = {
   merchants,
   cards,
   payments,
+  webhooks,
   ratelimits,
 };
 
