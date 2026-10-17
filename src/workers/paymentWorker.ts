@@ -67,7 +67,7 @@ export function createPaymentWorker(ctx: AppContext, services: Services, process
             continue;
           }
           Object.assign(job, { status: 'running', attempts: job.attempts + 1, lockedUntil: addMs(now, LEASE_MS), updatedAt: now });
-          out.push({ merchantId, job: structuredClone(job), payment: structuredClone(payment), card: structuredClone(d.cards[payment.sourceCardId] ?? null) });
+          out.push({ merchantId, job, payment, card: d.cards[payment.sourceCardId] ?? null }); // copied by JsonDb on return
         }
         return out;
       });

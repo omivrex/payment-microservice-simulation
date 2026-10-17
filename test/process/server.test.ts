@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
+import { once } from 'node:events';
 import { createServer } from 'node:net';
 import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -88,5 +90,44 @@ describe('§1.9 / §8.9 process behaviour', { timeout: 30_000 }, () => {
     assert.equal((await fetch(`http://127.0.0.1:${port}/health`)).status, 200);
     second.child.kill('SIGTERM');
     assert.equal(await second.exited(), 0);
+  });
+});
+
+describe('§8.12 fatal errors and shutdown timeout (fixture using the real lifecycle handlers)', { timeout: 30_000 }, () => {
+  const runFixture = (mode: string) => {
+    const child = spawn(process.execPath, ['--import', import.meta.resolve('tsx'), path.join(import.meta.dirname, '../fixtures/crashingProcess.ts'), mode, path.join(dir, 'db.json')], {
+      env: { PATH: process.env.PATH },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let out = '';
+    child.stdout!.on('data', (d) => (out += d));
+    child.stderr!.on('data', (d) => (out += d));
+    const exited = once(child, 'exit').then(([code]) => code as number | null);
+    return { child, exited, output: () => out };
+  };
+
+  it('unhandled rejection → fatal log (redacted), lock released, exit 1', async () => {
+    const run = runFixture('rejection');
+    assert.equal(await run.exited, 1);
+    assert.match(run.output(), /"level":"fatal","msg":"unhandled promise rejection"/);
+    assert.ok(!run.output().includes('4242424242424242'), 'card number redacted from the fatal log');
+    assert.match(run.output(), /\[REDACTED_PAN\]/);
+    await assert.rejects(stat(path.join(dir, 'db.json.lock')), { code: 'ENOENT' });
+  });
+
+  it('uncaught exception → fatal log with stack, exit 1', async () => {
+    const run = runFixture('exception');
+    assert.equal(await run.exited, 1);
+    assert.match(run.output(), /"msg":"uncaught exception"[^\n]*"name":"TypeError"[^\n]*"stack"/);
+  });
+
+  it('shutdown that hangs → forced exit 1 after the timeout', async () => {
+    const run = runFixture('hang');
+    while (!run.output().includes('fixture ready')) await new Promise((r) => setTimeout(r, 20));
+    const started = Date.now();
+    run.child.kill('SIGTERM');
+    assert.equal(await run.exited, 1);
+    assert.match(run.output(), /shutdown timed out; forcing exit/);
+    assert.ok(Date.now() - started >= 900, 'waited for the timeout');
   });
 });

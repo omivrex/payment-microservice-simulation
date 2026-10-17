@@ -22,7 +22,7 @@ describe('§1.9 configuration', () => {
     assert.equal(c.workerConcurrency, 5);
     assert.equal(c.webhookAllowInsecureUrls, false);
     assert.equal(c.retentionDays, 7);
-    assert.equal(c.dbWarnSizeMb, 20);
+    assert.equal(c.dbWarnSizeMb, 10);
     assert.equal(c.logLevel, 'info');
   });
 

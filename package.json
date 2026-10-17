@@ -20,11 +20,13 @@
     "test:process": "node --import tsx --import ./test/setup.ts --test --test-reporter=spec \"test/process/**/*.test.ts\"",
     "test:coverage": "node --import tsx --import ./test/setup.ts --test --test-reporter=spec --experimental-test-coverage \"test/**/*.test.ts\"",
     "smoke": "tsx scripts/smoke/run.ts",
-    "bench:db": "tsx scripts/bench-db.ts"
+    "bench:db": "tsx scripts/bench-db.ts",
+    "reencrypt": "tsx scripts/reencrypt.ts"
   },
   "dependencies": {
     "express": "5.3.0",
     "express-rate-limit": "8.7.1",
+    "immer": "11.1.18",
     "swagger-ui-express": "5.0.1",
     "zod": "4.6.7"
   },

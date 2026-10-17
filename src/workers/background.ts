@@ -1,6 +1,7 @@
 import type { AppContext } from '../app.js';
 import { createSimulatedProcessor } from '../processor/simulatedProcessor.js';
 import type { Services } from '../services.js';
+import { createHousekeeping } from './housekeeping.js';
 import { createPaymentWorker } from './paymentWorker.js';
 import { createWebhookDispatcher } from './webhookDispatcher.js';
 
@@ -84,6 +85,7 @@ export function startBackgroundLoops(ctx: AppContext, services: Services): Backg
   const loops: BackgroundLoop[] = [
     createPaymentWorker(ctx, services, processor),
     createWebhookDispatcher(ctx, ctx.resolveHost ? { resolver: ctx.resolveHost } : {}),
+    createHousekeeping(ctx),
   ];
   for (const loop of loops) loop.start();
   return loops;

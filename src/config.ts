@@ -123,7 +123,7 @@ export function loadConfig(env: Env = process.env): Config {
     workerConcurrency: int('WORKER_CONCURRENCY', 5, 1, 100),
     webhookAllowInsecureUrls: bool('WEBHOOK_ALLOW_INSECURE_URLS', false),
     retentionDays: int('RETENTION_DAYS', 7, 1, 3650),
-    dbWarnSizeMb: int('DB_WARN_SIZE_MB', 20, 1, 100_000),
+    dbWarnSizeMb: int('DB_WARN_SIZE_MB', 10, 1, 100_000),
     logLevel: rawLevel as LogLevel,
     rateLimits: {
       signupPerHour: int('RATE_LIMIT_SIGNUP_PER_HOUR', 5, 1, 1_000_000),

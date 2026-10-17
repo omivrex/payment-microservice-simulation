@@ -97,7 +97,7 @@ for (const { merchantId, jobId } of due.slice(0, freeSlots)) {
 | **Every operation names its scope** | Merchant isolation becomes **structural**: a merchant-scoped mutator can't even see another merchant's data, so the "forgot to filter by `merchantId`" bug can't happen (see [Security §4.6](04-security.md#46-merchant-isolation)) |
 | **No transaction may span two scopes** | This is the rule that makes per-merchant files (§7.11) possible later **without changing any business code**: only `JsonDb`'s internals would change. Everything already fits the rule, because no operation needs to change central and merchant data together |
 | **A merchant's scope is created on its first write** | Sign-up then touches **only** the central scope (merchant + keys). Nothing is created in the merchant scope until the merchant actually does something, so there are no half-created merchants and no orphaned data to clean up |
-| **The draft copies only the scope being changed** | Cloning one merchant's data instead of the whole database makes the copying part of a write proportional to *that merchant's* size. Serializing the file still covers everything (§7.9) |
+| **Copy-on-write drafts (Immer)** | The mutator works on a draft, and only the records it changes are copied. Unchanged records are shared with the committed state, which is never mutated, so rollback is still free. Adopted after measurement (§7.9, §7.11 option C) |
 | **`scanMerchants` is read-only** | Workers read across merchants to *find* work, but each change still goes through a scoped transaction, so the rule above is never broken |
 | **The mutator must be synchronous** (no `async`: enforced by the TypeScript type, and at runtime by rejecting a mutator that returns a Promise) | Transactions run one at a time. An `await` inside one (a processor call, an HTTP request) would block **every** other write while it waits. Keeping mutators synchronous forces slow work outside the transaction, which is exactly what the worker design does (see [Lifecycle §3.4](03-payment-lifecycle.md#34-the-payment-worker)) |
 | **Throwing = rollback** | Business rules are checked inside the transaction and simply `throw`. There's no manual undo code to write or forget |
@@ -117,7 +117,7 @@ sequenceDiagram
 
     C->>Q: transact(scope, mutator)
     Note over Q: Waits until all earlier transactions finish
-    Q->>M: draft = structuredClone(committed scope)
+    Q->>M: draft = copy-on-write view of committed scope
     Q->>Q: result = mutator(draft)
     alt mutator throws
         Q-->>C: reject (draft discarded, nothing changed)
@@ -302,17 +302,22 @@ There are two separate costs, and they hit at different sizes:
 1. **Write cost hits first.** Every commit serializes and writes the whole file, so the time per write grows with total data and caps how many writes per second the service can do.
 2. **Memory hits later.** It only becomes a problem at hundreds of MB.
 
-### Capacity limit
+### Capacity limit (measured)
 
-| Payments (approx.) | File size (approx.) | Time per write (estimate) | Assessment |
-|---|---|---|---|
-| 1,000 | ~2 MB | ~10–20 ms | Comfortable |
-| 10,000 | ~20 MB | ~100–200 ms | **Design limit**: about 5–10 writes/s |
-| 100,000 | ~200 MB | ~1–2 s | Unusable: each payment needs 4–5 writes over its life |
+Measured with `yarn bench:db` on a development laptop (macOS, SSD), in the **worst case**: one merchant holding everything, and every payment still carrying 2 jobs and 3 events inside the retention window.
 
-The estimates assume about 1.5–2 KB per payment (with history and metadata) and serialization at roughly 100–200 MB/s. **They're replaced with measured numbers** once `yarn bench:db` exists. That script builds datasets of 1k, 10k and 50k payments and times commits on the current machine.
+| Payments | File size | Commit time (avg / p95) | Max commits/s | Heap | Assessment |
+|---|---|---|---|---|---|
+| 1,000 | 4.3 MB | 68 / 77 ms | ~15 | 31 MB | Comfortable |
+| 2,000 | ~9 MB | ~130 ms | ~7 | ~45 MB | **Design limit** |
+| 10,000 | 43 MB | 395 / 499 ms | ~3 | 100 MB | Too slow for interactive use |
+| 50,000 | 215 MB | 2.4 / 2.8 s | < 1 | 484 MB | Unusable |
 
-**The service is designed for up to about 10,000 payments or about 20 MB of data.** That's ample for a simulator: about 300 test payments a day for a month.
+**The service is designed for about 2,000 payments, or about 10 MB of data**, in this worst case. Because events and jobs are pruned after `RETENTION_DAYS`, a long-running simulator mostly holds payments (about 1.5 KB each), so real capacity in payments is several times higher. Either way, this is ample for a simulator.
+
+**Why the original estimate was wrong:** the first estimate (about 10,000 payments) assumed serialization dominates. The benchmark showed that copying the scope for each transaction (`structuredClone`) was ~70% of commit time. That triggered option C in §7.11 (copy-on-write drafts), which roughly halved commit time and memory. The numbers above are *after* that change. What remains is serializing and fsyncing the whole file, which only a different storage design removes (§7.11).
+
+The default `DB_WARN_SIZE_MB` is **10** to match this limit.
 
 ### Staying within it
 
@@ -321,7 +326,7 @@ The estimates assume about 1.5–2 KB per payment (with history and metadata) an
 | **Retention pruning** ([Data model §2.6](02-data-model.md#26-data-retention)) | Jobs, events, deliveries, idempotency records and expired tokens, the fastest-growing data, stay bounded |
 | **Size caps** | `metadata`, descriptions and webhook endpoint counts are limited, so no single record can grow large |
 | **No `lastUsedAt` on API keys** | Avoids turning every request into a write |
-| **Size warning** | When the file passes `DB_WARN_SIZE_MB` (default `20`), a warning is logged at startup and the first time a commit crosses the threshold. It says which limit was passed and points to §7.11 |
+| **Size warning** | When the file passes `DB_WARN_SIZE_MB` (default `10`), a warning is logged at startup and the first time a commit crosses the threshold. It says which limit was passed and points to §7.11 |
 
 **Why a warning and not a hard limit:** refusing writes past a threshold would turn a performance problem into an outage of a payment service. A warning makes the limit visible early, while everything still works, so someone can decide what to do.
 
@@ -332,7 +337,7 @@ The estimates assume about 1.5–2 KB per payment (with history and metadata) an
 | Limitation | Consequence | Upgrade path |
 |---|---|---|
 | **Single process only** | No horizontal scaling. Workers must run in the same process | SQLite (still single-host), then Postgres |
-| Whole-file serialize and write on every commit | Write latency grows with total data, so capacity is limited to about 10k payments (§7.9) | See §7.11 |
+| Whole-file serialize and write on every commit | Write latency grows with total data, so capacity is limited to about 2,000 payments in the worst case (§7.9) | See §7.11 |
 | All data held in memory | RAM use is proportional to the database size | See §7.11 |
 | Payments, saved cards and merchants are never pruned | Business data grows without bound | Archiving (§7.11, option B) |
 | No query language or secondary indexes | Filters are in-memory scans | Add in-memory indexes if a scan ever becomes noticeable |
@@ -350,19 +355,19 @@ We weighed these options when deciding how to deal with growth. Two were **adopt
 |---|---|---|
 | **A. Capacity limit + size warning** (§7.9) | State the design limit and log a warning when the file outgrows it | Costs about 5 lines. Turns a silent slowdown into a visible, explained signal. Fits a simulator, where data volume is small and under the operator's control |
 | **Scoped interface** (§7.2) | Every read and write names its scope (central or one merchant). No transaction spans scopes | Almost free, because it's the tenancy rule we already enforce. It makes merchant isolation structural, cuts the copying part of each write to one merchant's data, and keeps per-merchant files possible later without touching business code |
+| **C. Copy-on-write drafts** (Immer, adopted during implementation) | A transaction copies only the records it changes | Its documented trigger fired: the benchmark showed copying was ~70% of commit time. It halved commit time and memory, adds one small dependency, and is confined to `JsonDb` |
 
 ### Deferred
 
 | Option | Benefits | Costs | Why not now | Revisit when |
 |---|---|---|---|---|
 | **B. Archive finished payments**: move payments that have been in a final state (`refunded`, `cancelled`, `failed`, or `captured` for N days) to monthly append-only files that aren't held in memory | Bounds **both** memory and write cost, even for a single large merchant | `GET /payments/:id` needs a slower fallback that searches archives. Listing and filtering across live and archived data gets harder. Refunding a long-captured payment would need it un-archived first | Real complexity in the API for a size we don't expect a simulator to reach | Real data approaches the capacity limit **and** most of it is old, finished payments |
-| **C. Copy-on-write drafts** (e.g. the Immer library): a transaction copies only the records it changes | Copying becomes proportional to the *change*, not the scope. Cuts write cost further | One more dependency. Mutators work on proxies, which is a subtle mental model. **Serialization still covers the whole file**, so it's at most about a 2× gain | The scoped interface already limits copying to one merchant, and serialization remains the main cost | Benchmarks show copying, not serializing, dominates commit time |
 | **D. Append-only change log + periodic snapshots**: each commit appends only its changes, and the full file is rewritten from time to time | Write cost becomes proportional to the change: the biggest gain in write speed | A log format, replaying it on startup, compaction, recovering from a half-written log entry: in effect, building a database engine. Memory is still unbounded | The most complex option, and SQLite (E) does all of this, tested and correct | Not planned. If writes outgrow the JSON file, go to E instead |
 | **E. Move to SQLite** | Real ACID transactions, indexes, data on disk instead of in memory, handles millions of rows | Replaces `JsonDb`, so the data is no longer a JSON file, which is a project requirement. Adds a native dependency | Conflicts with the project requirement | The requirement is dropped, or the service outgrows a simulator |
 | **F1. One file per merchant, all loaded**: `central.json` + `merchants/<id>.json`, all kept in memory | Write cost depends on **that merchant's data only**. Merchants' commits don't queue behind each other. A corrupted file affects one merchant. Per-merchant export and deletion become trivial | **Memory doesn't improve** (everything is still loaded). More files to rename and back up. Sign-up needs a creation order (merchant data is created on first write, so this is already handled) | The likely workload of a simulator is **one or two heavy test merchants**, and splitting gives a single dominant merchant nothing | Many merchants each have moderate amounts of data, and write latency becomes a problem |
 | **F2. One file per merchant, loaded on demand**: like F1, but inactive merchants are dropped from memory | Bounds memory by *active* merchants, plus all F1 benefits | Significant: a cache of loaded merchants, loading while a request waits, never evicting mid-transaction or before writes are flushed, and an index of due jobs so workers can find work in unloaded merchants. This is where bugs would come from | The most complex form of splitting, and like F1 it doesn't help a single large merchant | Many merchants, mostly inactive, with total memory becoming the problem |
 
-**The likely order if growth ever becomes a problem:** C (cheap, if copying dominates) → F1 (if there are many merchants) → B (if old payments dominate) → E (if the JSON requirement can be dropped). Thanks to the scoped interface, C, F1, F2 and E are all changes inside `JsonDb` only. B is the one option that also changes the payments module.
+**The likely order if growth ever becomes a problem** (C is already adopted): F1 (if there are many merchants) → B (if old payments dominate) → E (if the JSON requirement can be dropped). Thanks to the scoped interface, F1, F2 and E are all changes inside `JsonDb` only. B is the one option that also changes the payments module.
 
 ## 7.12 Tests
 

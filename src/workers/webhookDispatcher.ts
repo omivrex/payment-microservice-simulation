@@ -75,7 +75,7 @@ export function createWebhookDispatcher(ctx: AppContext, options: DispatcherOpti
             continue;
           }
           Object.assign(delivery, { status: 'sending', attempts: delivery.attempts + 1, lockedUntil: addMs(now, DELIVERY_LEASE_MS) });
-          out.push({ merchantId, delivery: structuredClone(delivery), event: structuredClone(event), endpoint: structuredClone(endpoint) });
+          out.push({ merchantId, delivery, event, endpoint }); // copied by JsonDb on return
         }
         return out;
       });

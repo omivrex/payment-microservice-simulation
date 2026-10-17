@@ -148,7 +148,7 @@ All configuration comes from environment variables. The service **refuses to sta
 | `WORKER_CONCURRENCY` | no | `5` | Maximum jobs processed at the same time |
 | `WEBHOOK_ALLOW_INSECURE_URLS` | no | `false` | Allow `http://` and private/loopback webhook URLs (local development only) |
 | `RETENTION_DAYS` | no | `7` | How long completed jobs, events and deliveries are kept |
-| `DB_WARN_SIZE_MB` | no | `20` | Log a warning when the database file outgrows the design capacity (see [Persistence §7.9](07-persistence.md#79-performance-and-capacity)) |
+| `DB_WARN_SIZE_MB` | no | `10` | Log a warning when the database file outgrows the design capacity (see [Persistence §7.9](07-persistence.md#79-performance-and-capacity)) |
 | `LOG_LEVEL` | no | `info` | Minimum log level: `debug`, `info`, `warn`, `error`, `fatal` (see [Error handling §8.6](08-error-handling.md#86-server-logging)) |
 | `RATE_LIMIT_SIGNUP_PER_HOUR` | no | `5` | Sign-ups per IP per hour (see [Security §4.9](04-security.md#49-rate-limiting)) |
 | `RATE_LIMIT_TOKENS_PER_MINUTE` | no | `60` | `POST /tokens` calls per API key per minute |

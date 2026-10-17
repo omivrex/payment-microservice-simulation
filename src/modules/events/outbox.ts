@@ -1,4 +1,5 @@
 import type { EventType, MerchantData, StoredEvent, WebhookDelivery } from '../../db/schema.js';
+import { plain } from '../../db/jsonDb.js';
 import { newId } from '../../ids.js';
 
 /**
@@ -14,7 +15,7 @@ export function recordEvent(
   now: string,
   extra: Omit<StoredEvent['data'], 'object'> = {},
 ): StoredEvent {
-  const event: StoredEvent = { id: newId('evt'), merchantId, type, data: { object: structuredClone(object), ...extra }, createdAt: now };
+  const event: StoredEvent = { id: newId('evt'), merchantId, type, data: { object: plain(object), ...(extra.action ? { action: plain(extra.action) } : {}) }, createdAt: now };
   d.events[event.id] = event;
 
   for (const endpoint of Object.values(d.webhookEndpoints)) {

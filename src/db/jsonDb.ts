@@ -1,4 +1,5 @@
 import * as fsp from 'node:fs/promises';
+import { Immer } from 'immer';
 import path from 'node:path';
 import { StartupError, StorageError } from '../errors.js';
 import type { Logger } from '../logging/logger.js';
@@ -49,6 +50,12 @@ export interface JsonDbOptions {
 }
 
 type Sync<T> = T extends PromiseLike<unknown> ? never : T;
+
+// Auto-freeze off: committed state is only ever replaced (never mutated), and reads return copies anyway.
+const immer = new Immer({ autoFreeze: false });
+
+/** Deep plain-JSON copy. Works on Immer drafts (unlike structuredClone). Records are JSON-safe by design. */
+export const plain = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
 
 const RENAME_ATTEMPTS = 5;
 
@@ -186,17 +193,16 @@ export class JsonDb {
 
   transactCentral<T>(mutator: (draft: CentralData) => Sync<T>): Promise<T> {
     return this.#enqueue(() => {
-      const draft = structuredClone(this.#data.central);
-      const result = JsonDb.#runMutator(mutator, draft);
-      return { next: { ...this.#data, central: draft }, result };
+      const { next, result } = JsonDb.#produce(this.#data.central, mutator);
+      return { next: { ...this.#data, central: next }, result };
     });
   }
 
   transact<T>(merchantId: string, mutator: (draft: MerchantData) => Sync<T>): Promise<T> {
     return this.#enqueue(() => {
-      const draft = structuredClone(this.#data.merchants[merchantId] ?? emptyMerchantData());
-      const result = JsonDb.#runMutator(mutator, draft);
-      return { next: { ...this.#data, merchants: { ...this.#data.merchants, [merchantId]: draft } }, result };
+      const base = this.#data.merchants[merchantId] ?? emptyMerchantData();
+      const { next, result } = JsonDb.#produce(base, mutator);
+      return { next: { ...this.#data, merchants: { ...this.#data.merchants, [merchantId]: next } }, result };
     });
   }
 
@@ -212,12 +218,22 @@ export class JsonDb {
     return Buffer.byteLength(JSON.stringify(this.#data));
   }
 
-  static #runMutator<D, T>(mutator: (draft: D) => T, draft: D): T {
-    const result = mutator(draft);
-    if (result && typeof (result as { then?: unknown }).then === 'function') {
-      throw new TypeError('Transaction mutators must be synchronous; move async work outside the transaction');
-    }
-    return result;
+  /**
+   * Copy-on-write transaction (docs/07-persistence.md §7.11, option C): the mutator works on an
+   * Immer draft, so only the records it changes are copied. Unchanged records are shared with the
+   * committed state, which is never mutated. If the mutator throws, the draft is discarded.
+   * The result is copied to plain JSON inside the draft, so callers never hold a draft (Proxy).
+   */
+  static #produce<D extends object, T>(base: D, mutator: (draft: D) => T): { next: D; result: T } {
+    let result: T | undefined;
+    const next = immer.produce(base, (draft) => {
+      const r = mutator(draft as D);
+      if (r && typeof (r as { then?: unknown }).then === 'function') {
+        throw new TypeError('Transaction mutators must be synchronous; move async work outside the transaction');
+      }
+      result = r === undefined ? undefined : plain(r);
+    });
+    return { next, result: result as T };
   }
 
   #enqueue<T>(prepare: () => { next: DatabaseFile; result: T }): Promise<T> {
@@ -226,7 +242,7 @@ export class JsonDb {
       const { next, result } = prepare(); // throws → rejected, nothing changed
       await this.#write(next);
       this.#data = next;
-      return structuredClone(result);
+      return result;
     });
     this.#tail = run.then(
       () => undefined,
