@@ -11,7 +11,7 @@ These rules apply to every record.
 | **Currency** | Uppercase ISO 4217 code (`USD`). Supported: USD, EUR, GBP, CAD, AUD, NGN, JPY | A standard, unambiguous code. A short list keeps validation simple |
 | **Timestamps** | ISO 8601 strings in UTC (`2026-10-15T09:30:00.000Z`) | Human-readable in the JSON file, sort correctly as plain strings, and carry no time-zone ambiguity |
 | **Nullable fields** | Use `null`, never omit the key | Every record of a type has the same keys, which makes the JSON file and API responses predictable |
-| **Tenancy** | Every record (except `merchants`) has a `merchantId` | Every query is filtered by the authenticated merchant, so data can never leak between merchants |
+| **Tenancy** | Merchant-owned records are stored **inside their merchant's subtree** (§2.3), and also carry a `merchantId` field | The subtree makes isolation structural: code for one merchant never sees another's data. The `merchantId` field keeps a record self-describing when it's copied out of its subtree (event snapshots, exports, a future per-merchant file or archive) |
 
 **ID prefixes:** `mer_` merchant · `key_` API key · `tok_` token · `card_` card · `pay_` payment · `job_` job · `evt_` event · `we_` webhook endpoint · `whd_` webhook delivery.
 
@@ -35,23 +35,52 @@ erDiagram
 
 ## 2.3 The database file
 
-The whole database is **one JSON document**. Each collection is an object keyed by record ID.
+The whole database is **one JSON document**, split into two **scopes** (see [Persistence §7.2](07-persistence.md#72-interface-scoped-transactions)):
+
+- **central**: data needed before we know which merchant is calling;
+- **merchants**: one entry per merchant, holding everything that belongs to that merchant.
+
+Each collection is an object keyed by record ID.
 
 ```ts
 interface DatabaseSchema {
   meta: { schemaVersion: 1 };
-  merchants: Record<string, Merchant>;
-  apiKeys: Record<string, ApiKey>;
-  tokens: Record<string, Token>;
-  cards: Record<string, Card>;
-  payments: Record<string, Payment>;
-  jobs: Record<string, Job>;
-  events: Record<string, Event>;
-  webhookEndpoints: Record<string, WebhookEndpoint>;
-  webhookDeliveries: Record<string, WebhookDelivery>;
-  idempotency: Record<string, IdempotencyRecord>;
+  central: {
+    merchants: Record<string, Merchant>;
+    apiKeys: Record<string, ApiKey>;
+  };
+  merchants: Record<string /* merchantId */, {
+    tokens: Record<string, Token>;
+    cards: Record<string, Card>;
+    payments: Record<string, Payment>;
+    jobs: Record<string, Job>;
+    events: Record<string, Event>;
+    webhookEndpoints: Record<string, WebhookEndpoint>;
+    webhookDeliveries: Record<string, WebhookDelivery>;
+    idempotency: Record<string, IdempotencyRecord>;
+  }>;
 }
 ```
+
+```mermaid
+flowchart TD
+    DB[("db.json")] --> META["meta<br/>schemaVersion"]
+    DB --> C["central"]
+    DB --> MS["merchants"]
+    C --> C1["merchants"]
+    C --> C2["apiKeys"]
+    MS --> M1["mer_7c1e..."]
+    MS --> M2["mer_a91f..."]
+    M1 --> D1["tokens, cards, payments, jobs,<br/>events, webhookEndpoints,<br/>webhookDeliveries, idempotency"]
+    M2 --> D2["same collections"]
+```
+
+**Why group data by merchant instead of one flat collection per type:**
+- **Isolation by structure.** Code working on a merchant only gets that merchant's subtree, so it can't read another merchant's records, even by mistake.
+- **Cheaper writes.** A transaction copies only the subtree it changes.
+- **Ready for splitting.** Each subtree could become its own file later without changing business code (see [Persistence §7.11](07-persistence.md#711-scaling-options-considered)).
+
+**Why `central` holds merchants and API keys:** authentication has to find a key *before* it knows the merchant, so keys can't live inside a merchant's subtree.
 
 **Why objects keyed by ID instead of arrays:** looking up a record by ID is `O(1)` (`db.payments[id]`) instead of scanning an array. Every authenticated request and every job does at least one ID lookup.
 
@@ -97,7 +126,7 @@ A key string looks like `sk_test_<16-hex id>_<43-char random secret>`. The recor
 | Publishable keys stored in plain text | They're public by design (they ship in browser code), and the merchant needs to read them back from `GET /api-keys` |
 | ID embedded in the key | Makes authentication `O(1)` without storing the plain key or scanning every hash |
 | Exactly one active key of each type | Rotation is the only way to replace a key (see [Security](04-security.md#api-key-rotation)). One active key per type means "which key is current?" always has a single answer |
-| `lastUsedAt` **not** tracked | It would turn every read request into a database write, and each write rewrites the whole file (see [Persistence](07-persistence.md#79-performance)) |
+| `lastUsedAt` **not** tracked | It would turn every read request into a database write, and each write rewrites the whole file (see [Persistence](07-persistence.md#79-performance-and-capacity)) |
 
 ### Token
 

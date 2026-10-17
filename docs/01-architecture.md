@@ -148,6 +148,7 @@ All configuration comes from environment variables. The service **refuses to sta
 | `WORKER_CONCURRENCY` | no | `5` | Maximum jobs processed at the same time |
 | `WEBHOOK_ALLOW_INSECURE_URLS` | no | `false` | Allow `http://` and private/loopback webhook URLs (local development only) |
 | `RETENTION_DAYS` | no | `7` | How long completed jobs, events and deliveries are kept |
+| `DB_WARN_SIZE_MB` | no | `20` | Log a warning when the database file outgrows the design capacity (see [Persistence §7.9](07-persistence.md#79-performance-and-capacity)) |
 
 **Why fail fast on startup:** a payment service running with a missing encryption key would either crash on the first card, or worse, store data it can never decrypt. Failing at boot makes a misconfiguration obvious right away.
 
@@ -183,7 +184,8 @@ payment-service/
 │       ├── webhookDispatcher.ts
 │       └── housekeeping.ts
 ├── scripts/
-│   └── generate-secrets.ts
+│   ├── generate-secrets.ts
+│   └── bench-db.ts             measures commit time at 1k / 10k / 50k payments
 └── test/
 ```
 

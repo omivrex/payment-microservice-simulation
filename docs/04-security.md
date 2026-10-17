@@ -186,9 +186,12 @@ The CVC is checked for format (3–4 digits) when the request arrives, then **dr
 ## 4.6 Merchant isolation
 
 - Every module function takes the authenticated `merchantId` as its first argument.
-- Every lookup checks `record.merchantId === merchantId`. If it doesn't match, the response is exactly the same as for a missing record: **404**.
+- Data access goes through **scoped** database calls: `db.read(merchantId, …)` / `db.transact(merchantId, …)` (see [Persistence §7.2](07-persistence.md#72-interface-scoped-transactions)). The callback receives **only that merchant's subtree** of the database.
+- Looking up another merchant's ID therefore finds nothing, and the response is exactly the same as for a missing record: **404**.
 
-**Why enforce this in the module layer and not only in routes:** the workers and any future routes then get the same guarantee automatically. No caller can forget the check, because it's part of the function signature.
+**Why structural isolation instead of `record.merchantId === merchantId` checks:** a check has to be written in every lookup, and a single forgotten one leaks data. With scoped access there's nothing to forget: other merchants' records simply aren't reachable from the callback.
+
+**Why enforce this in the module layer and not only in routes:** the workers and any future routes then get the same guarantee automatically. No caller can forget the scope, because it's part of the function signature.
 
 ## 4.7 Webhook signatures
 
