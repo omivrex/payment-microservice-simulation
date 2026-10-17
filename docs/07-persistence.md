@@ -99,7 +99,7 @@ for (const { merchantId, jobId } of due.slice(0, freeSlots)) {
 | **A merchant's scope is created on its first write** | Sign-up then touches **only** the central scope (merchant + keys). Nothing is created in the merchant scope until the merchant actually does something, so there are no half-created merchants and no orphaned data to clean up |
 | **The draft copies only the scope being changed** | Cloning one merchant's data instead of the whole database makes the copying part of a write proportional to *that merchant's* size. Serializing the file still covers everything (§7.9) |
 | **`scanMerchants` is read-only** | Workers read across merchants to *find* work, but each change still goes through a scoped transaction, so the rule above is never broken |
-| **The mutator must be synchronous** (no `async`, enforced by the TypeScript type) | Transactions run one at a time. An `await` inside one (a processor call, an HTTP request) would block **every** other write while it waits. Keeping mutators synchronous forces slow work outside the transaction, which is exactly what the worker design does (see [Lifecycle §3.4](03-payment-lifecycle.md#34-the-payment-worker)) |
+| **The mutator must be synchronous** (no `async`: enforced by the TypeScript type, and at runtime by rejecting a mutator that returns a Promise) | Transactions run one at a time. An `await` inside one (a processor call, an HTTP request) would block **every** other write while it waits. Keeping mutators synchronous forces slow work outside the transaction, which is exactly what the worker design does (see [Lifecycle §3.4](03-payment-lifecycle.md#34-the-payment-worker)) |
 | **Throwing = rollback** | Business rules are checked inside the transaction and simply `throw`. There's no manual undo code to write or forget |
 | **Reads return deep copies** | A caller can't accidentally modify committed data without going through `transact` |
 
@@ -277,7 +277,8 @@ The lock is deleted on graceful shutdown (`SIGINT` / `SIGTERM`), after all queue
 3. Read `db.json`:
    - **missing** → create it with defaults;
    - **invalid JSON** → **refuse to start** and leave the file untouched;
-   - **valid** → run any migrations from `meta.schemaVersion` up to the current version.
+   - **valid** → run any migrations from `meta.schemaVersion` up to the current version;
+   - **`schemaVersion` newer than this code supports** → **refuse to start** and leave the file untouched. Older code can't know what a newer version changed, and writing to the file would damage that data.
 4. Check the file size against `DB_WARN_SIZE_MB` and log a warning if it's over (§7.9).
 5. Start the HTTP server and the background loops.
 
@@ -362,3 +363,65 @@ We weighed these options when deciding how to deal with growth. Two were **adopt
 | **F2. One file per merchant, loaded on demand**: like F1, but inactive merchants are dropped from memory | Bounds memory by *active* merchants, plus all F1 benefits | Significant: a cache of loaded merchants, loading while a request waits, never evicting mid-transaction or before writes are flushed, and an index of due jobs so workers can find work in unloaded merchants. This is where bugs would come from | The most complex form of splitting, and like F1 it doesn't help a single large merchant | Many merchants, mostly inactive, with total memory becoming the problem |
 
 **The likely order if growth ever becomes a problem:** C (cheap, if copying dominates) → F1 (if there are many merchants) → B (if old payments dominate) → E (if the JSON requirement can be dropped). Thanks to the scoped interface, C, F1, F2 and E are all changes inside `JsonDb` only. B is the one option that also changes the payments module.
+
+## 7.12 Tests
+
+`JsonDb` is tested against real temp files, with file operations (`rename`, `fsync`) injectable so failures can be simulated on any OS (see [Testing strategy §9.3](09-testing.md#93-determinism)).
+
+### Transactions
+
+| Test | Checks | Edge case guarded |
+|---|---|---|
+| Mutator throws → in-memory state **and** the file are unchanged (file compared byte for byte) | Rollback (§7.4) | A partial change surviving an error |
+| Successful commit → reopening the file gives exactly the in-memory state | Durability of a commit | Memory and disk disagreeing |
+| Mutating an object returned by `read()` → the database is unaffected | Reads return copies | Changes that bypass transactions |
+| Mutating the **result** returned by `transact()` → the database is unaffected | Results are copies too | Same, via the return value |
+| 100 concurrent increments of one counter → 100, and transactions run in the order they were queued | Serial, FIFO queue | Lost updates |
+| Mutator that returns a Promise (TypeScript check bypassed) → rejected, nothing changed | Runtime synchronous guard | An `await` inside a transaction stalling every write |
+| A transaction fails, then the next one succeeds | The queue survives failures | One error permanently blocking all writes |
+
+### Scopes
+
+| Test | Checks | Edge case guarded |
+|---|---|---|
+| `transact(merchantA, …)` draft contains only A's collections | Scope isolation (§7.2) | A mutator able to reach another merchant's data |
+| `read(unknownMerchant, …)` → empty collections, and **no** write happens | Reads don't create scopes | Probing random merchant IDs inflating the file |
+| First `transact` for a new merchant creates its scope | Lazy creation | – |
+| `scanMerchants` returns matches from every merchant, and its results are copies | Cross-merchant read for workers | Workers missing a merchant's due jobs |
+| Sign-up writes only to the central scope | No cross-scope transactions | Half-created merchants |
+
+### Startup and recovery
+
+| Test | Checks | Edge case guarded |
+|---|---|---|
+| Missing file → created with defaults | First start | – |
+| Leftover `db.json.tmp` next to a valid `db.json` → temp deleted, `db.json` loaded unchanged | Crash mid-commit (§7.8) | A half-written commit being loaded, or blocking startup |
+| Invalid JSON → refuse to start, file byte-for-byte unchanged | No silent reset | Wiping every payment by "starting fresh" |
+| `schemaVersion` newer than supported → refuse to start, file unchanged | Downgrade protection | Old code damaging newer data |
+
+### Single-process lock
+
+| Test | Checks | Edge case guarded |
+|---|---|---|
+| Second `open()` on the same file while the first holds it → error, first instance unaffected | Lock (§7.7) | Two writers silently overwriting each other |
+| Lock file containing the PID of a process that has exited (spawn a child, wait for it to exit, use its PID) → lock taken over | Stale lock recovery | Never being able to start again after a crash |
+| `close()` → lock file removed, and a new `open()` succeeds | Clean release | – |
+
+### File operations
+
+| Test | Checks | Edge case guarded |
+|---|---|---|
+| `rename` fails with `EPERM` twice, then succeeds → commit succeeds | Rename retry (§7.6) | Windows antivirus or indexer locks failing commits |
+| `rename` fails with `EPERM` 5 times → `StorageError`, memory unchanged | Retry limit | Retrying forever |
+| `rename` fails with `ENOENT` → no retry, `StorageError` immediately | Only retry `EPERM`/`EBUSY` | Masking real errors with retries |
+| Operation order is write temp → `fsync` → rename | Durability (§7.5) | A rename before the data reaches the disk |
+| Directory made read-only (Linux/macOS) → `StorageError`. Made writable again → next commit succeeds, no restart needed | Recovery from storage failures | Needing a restart after freeing disk space |
+
+### Size warning
+
+| Test | Checks | Edge case guarded |
+|---|---|---|
+| Commit that pushes the file over `DB_WARN_SIZE_MB` → **one** `warn` log | Warning on crossing (§7.9) | – |
+| Further commits while still over → no new warnings | No log flooding | Burying other logs |
+| Drops below (after pruning), then crosses again → warns again | Re-arming | A second growth period going unnoticed |
+| File already over the threshold at startup → warning at startup | Startup check | – |

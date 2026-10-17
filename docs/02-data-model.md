@@ -100,7 +100,7 @@ interface Merchant {
 }
 ```
 
-**Why `email` is unique:** sign-up is open (see the [README](README.md#intentional-decision-open-merchant-sign-up)), and a unique email stops accidental duplicate accounts. It is **not** verified, because identity verification is out of scope.
+**Why `email` is unique:** sign-up is open (see the [README](README.md#intentional-decision-open-merchant-sign-up)), and a unique email stops accidental duplicate accounts. Emails are compared **case-insensitively** (stored lowercased), because `Dev@Acme.test` and `dev@acme.test` reach the same inbox. It is **not** verified, because identity verification is out of scope.
 
 ### ApiKey
 
@@ -210,6 +210,7 @@ interface Payment {
     expYear: number;
   };
   sourceCardId: string;                   // INTERNAL: vault card used by the worker (never returned by the API)
+  saveCardOnApproval: boolean;            // INTERNAL: saveCard was requested; the card is saved only if authorization is approved
   authorizationCode: string | null;
   failure: { code: string; message: string } | null;
   pendingAction: {
@@ -328,7 +329,7 @@ interface WebhookDelivery {
 interface IdempotencyRecord {
   id: string;                     // `${merchantId}:${method}:${path}:${idempotencyKey}`
   merchantId: string;
-  requestHash: string;            // SHA-256 of the request body
+  requestHash: string;            // SHA-256 of the request body as canonical JSON (keys sorted)
   status: 'in_progress' | 'completed';
   responseStatus: number | null;
   responseBody: unknown | null;
@@ -348,7 +349,7 @@ Internal fields are **never** returned. Each module has a `toView()` function th
 |---|---|
 | ApiKey | `secretHash` |
 | Card | `numberEncrypted`, `fingerprint` |
-| Payment | `sourceCardId`, `merchantId` |
+| Payment | `sourceCardId`, `saveCardOnApproval`, `merchantId` |
 | WebhookEndpoint | `secretEncrypted` (the plain secret is returned once, at creation or rotation) |
 
 **Why an explicit `toView()` instead of deleting fields from the stored object:** with an allow-list, a field added later is hidden by default until someone deliberately exposes it. A block-list would leak new fields by default.
@@ -359,7 +360,8 @@ The housekeeping loop (see [Architecture](01-architecture.md#14-background-proce
 
 | Data | When |
 |---|---|
-| Unused tokens and their unsaved cards | After `expiresAt` |
+| Tokens (used or not) | After `expiresAt` |
+| Unsaved cards | When their token expires unused, or right after authorization. **Never** while a `pending` payment still needs them |
 | Idempotency records | After `expiresAt` (24 h) |
 | Succeeded or failed jobs | `RETENTION_DAYS` after completion (default 7) |
 | Events, and deliveries that are finished | `RETENTION_DAYS` after creation |
@@ -367,3 +369,42 @@ The housekeeping loop (see [Architecture](01-architecture.md#14-background-proce
 Payments, saved cards, merchants, keys and endpoints are **never** deleted automatically.
 
 **Why prune at all:** every write rewrites the whole JSON file, so write speed depends on file size. Without pruning, the operational records (jobs, events, deliveries) would grow forever and every write would get slower.
+
+## 2.7 Tests
+
+### Public views
+
+| Test | Checks | Edge case guarded |
+|---|---|---|
+| For every resource (merchant, API key, token, card, payment, webhook endpoint, delivery, event), the keys of the API object **exactly equal** the documented list | `toView()` allow-lists (§2.5) | A new internal field (e.g. `sourceCardId`, `numberEncrypted`, `secretHash`) leaking into responses |
+| Payment made with a card that's later deleted still shows `brand` and `last4` | Card snapshot on the payment | A payment losing its display details when the vault entry goes |
+
+### IDs and value rules
+
+| Test | Checks | Edge case guarded |
+|---|---|---|
+| Each ID type matches `<prefix>_<32 hex>`. 10,000 generated IDs are all unique | ID convention (§2.1) | Wrong prefixes, or a broken random source producing duplicates |
+| Amounts: `1` and `99999999` accepted. `0`, `-1`, `10.5`, `"1000"`, `100000000`, `null` → 400 | Integers in minor units only | Floating-point money, or strings being quietly converted to numbers |
+| Currency: `"usd"` → stored as `"USD"`. `"US"`, `"XYZ"`, `840` → 400 | Normalisation + allow-list | Case differences creating "different" currencies |
+| Metadata: 20 keys accepted, 21 → 400. Key of 40 chars accepted, 41 → 400. Value of 500 chars accepted, 501 → 400. Number or object value → 400 | Size caps (§2.4 Payment) | Oversized records slowing every write for everyone |
+| Metadata `null` value: deletes the key in `PATCH`, rejected in `POST /payments` | `null` means "delete", and only where deleting makes sense | Ambiguous `null`s being stored as values |
+| `description` of 500 chars accepted, 501 → 400 | Size cap | Same as above |
+| Sign-up with `Dev@Acme.test` after `dev@acme.test` → `409 conflict` | Emails compared case-insensitively | Duplicate accounts differing only in letter case |
+
+### Retention (housekeeping, using a fake clock)
+
+| Test | Checks | Edge case guarded |
+|---|---|---|
+| Unused token past `expiresAt` → token **and** its unsaved card deleted | Abandoned checkouts are cleaned up | Encrypted card numbers kept for tokens nobody used |
+| Token past `expiresAt` whose card belongs to a **`pending`** payment (authorize job not run yet) → card **kept** | Housekeeping never deletes data a job still needs | The worker finding the card gone and failing a valid payment |
+| Saved card older than any retention period → kept | Only temporary data is pruned | Customers' saved cards disappearing |
+| Succeeded/failed jobs older than `RETENTION_DAYS` → deleted. `queued`/`running` jobs of any age → kept | Only finished work is pruned | Deleting a job that's mid-retry |
+| `pending`/`sending` deliveries of any age → kept. Finished deliveries and events past retention → deleted | Same rule for webhooks | Losing deliveries still on their retry schedule |
+| Idempotency records past 24 h → deleted, and the key works again | Expiry (§2.4) | Keys staying blocked forever |
+| Payments, merchants, API keys and webhook endpoints of any age → never deleted | Business records are permanent | Housekeeping deleting the data the service exists to keep |
+
+### Schema version
+
+| Test | Checks | Edge case guarded |
+|---|---|---|
+| File with `meta.schemaVersion` **higher** than the code supports → refuse to start, file byte-for-byte unchanged | Downgrade protection ([Persistence §7.8](07-persistence.md#78-startup-sequence)) | Older code misreading, then overwriting, data written by a newer version |

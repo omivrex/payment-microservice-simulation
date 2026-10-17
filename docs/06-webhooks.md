@@ -182,3 +182,65 @@ app.post('/webhooks/payments', express.raw({ type: 'application/json' }), (req, 
 - [ ] Don't rely on arrival order. Use `data.object.updatedAt`.
 - [ ] Respond `2xx` within 10 seconds, and do slow work asynchronously.
 - [ ] Use `GET /events` to reconcile after downtime.
+
+## 6.8 Tests
+
+Dispatcher tests use a **local receiver** with scripted responses, the fake clock and `tickOnce()` (see [Testing strategy §9.3](09-testing.md#93-determinism)). The 10 s delivery timeout is injected, so the timeout tests use a short value.
+
+### Outbox and fan-out
+
+| Test | Checks | Edge case guarded |
+|---|---|---|
+| A transaction that records an event and then throws → neither the payment change, the event nor any delivery is stored | Outbox atomicity (§6.3) | A webhook about a change that never happened, or a change with no webhook |
+| Endpoint subscribed to `["payment.captured"]` gets only captured events. `["*"]` gets all. A disabled endpoint gets none | Fan-out filter | Merchants receiving events they didn't subscribe to |
+| Endpoint created **after** an event → gets no delivery for it | Fan-out at write time | Old events suddenly delivered to a new endpoint |
+| Event with no matching endpoint → stored and visible in `GET /events`, no deliveries | Events exist without webhooks | Losing events for merchants who poll instead |
+| No events for `capturing` / `refunding` / `cancelling` | Event list (§6.1) | Noise events for transitions the merchant itself triggered |
+
+### Delivery outcomes
+
+| Test | Checks | Edge case guarded |
+|---|---|---|
+| Receiver returns `200`, `204`, `299` → `succeeded` | Any 2xx is success | Treating `204 No Content` as a failure |
+| `301`/`302` (not followed), `400`, `410`, `500`, timeout, connection refused → failed attempt, retry scheduled | Everything else is retried | Redirect-based SSRF, or giving up on a receiver's temporary misconfiguration |
+| Receiver streams a 10 MB response → attempt finishes normally, at most 1 KB read | Response size cap | Memory exhaustion from a hostile receiver |
+| One endpoint hangs until the timeout → deliveries to another endpoint complete in the meantime | Endpoints are independent (§6.5) | One slow merchant delaying everyone's webhooks |
+
+### Retry schedule
+
+| Test | Checks | Edge case guarded |
+|---|---|---|
+| Always-failing receiver: attempts at exactly +1 m, +5 m, +30 m, +2 h, +6 h, +12 h, +24 h after the previous one (fake clock), and not earlier | Schedule (§6.4) | Retrying too eagerly, or not at all |
+| After the 8th failure → `failed`, `nextAttemptAt: null`, no further attempts | Giving up | Retrying forever |
+| Receiver recovers at attempt 4 → `succeeded`, no further attempts | Stopping on success | Duplicate sends after success |
+
+### Signatures
+
+| Test | Checks | Edge case guarded |
+|---|---|---|
+| Receiver verifies every delivery with the [§6.6 example code](#66-verifying-signatures) and the endpoint's secret | End-to-end signing | Signing something other than the exact bytes sent |
+| `Webhook-Id` equals `event.id`. `Webhook-Event` equals `event.type`. `t` is the current time (fake clock) | Headers | – |
+| After `rotate-secret`, the next delivery verifies with the new secret and fails with the old one | Immediate secret rotation | Deliveries still signed with a leaked secret |
+
+### Endpoint changes during delivery
+
+| Test | Checks | Edge case guarded |
+|---|---|---|
+| Endpoint **deleted** while deliveries are pending → marked `failed` ("endpoint deleted"), nothing is sent | Deletion | Sending to a URL the merchant removed |
+| Endpoint **disabled** while deliveries are pending → marked `failed` ("endpoint disabled"), nothing is sent | Disabling ([API §5.9](05-api.md#59-webhooks)) | Sending to an endpoint the merchant turned off |
+| Endpoint URL **changed** while a delivery is pending → the next attempt goes to the new URL | URL read at send time | Retries going to a URL the merchant replaced |
+
+### Guarantees
+
+| Test | Checks | Edge case guarded |
+|---|---|---|
+| Delivery sent, receiver returns 200, then the commit is skipped (simulated crash), clock +31 s → sent **again** with the same `Webhook-Id` | At-least-once delivery (§6.5) | Losing a delivery when the process dies at the wrong moment |
+| Two `tickOnce()` calls in a row before the first finishes → each delivery is sent once | Lease prevents double claims | Two sends of the same attempt |
+| `data.object` is the payment **as it was** when the event happened, even after later changes | Snapshots | A receiver seeing state the event isn't about |
+
+### Events API
+
+| Test | Checks | Edge case guarded |
+|---|---|---|
+| Events older than `RETENTION_DAYS` (fake clock) → gone from `GET /events`. Newer ones → present | Retention | – |
+| A merchant's events list never contains another merchant's events | Isolation | Leaking payment snapshots across merchants |

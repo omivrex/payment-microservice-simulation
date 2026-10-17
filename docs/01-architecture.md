@@ -232,3 +232,37 @@ How errors are classified, logged and kept free of sensitive data is covered in 
 **Why 404 (not 403) for another merchant's resource:** a 403 would confirm that the ID exists. Returning 404 means one merchant can't discover anything about another merchant's data.
 
 **Why a stable `code` field in addition to `message`:** client code should branch on `code`, which never changes. `message` is for humans and may be reworded.
+
+## 1.9 Tests
+
+How these tests are run, and the fakes they use, is described in [Testing strategy](09-testing.md).
+
+### Configuration
+
+| Test | Checks | Edge case guarded |
+|---|---|---|
+| Each required variable missing in turn → exit 1, `fatal` log names the variable | Fail fast (§1.6) | A service running without an encryption key and failing on the first card |
+| `ENCRYPTION_KEYS` with a key that isn't 32 bytes, bad base64, or a duplicate version → exit 1 | Key format validation | A short key silently weakening AES-256, or two keys claiming to be `v1` |
+| `ENCRYPTION_ACTIVE_KEY_ID` not in `ENCRYPTION_KEYS` → exit 1 | Cross-variable consistency | Encrypting with a key that doesn't exist |
+| `HASHING_SECRET` under 32 bytes → exit 1 | Minimum secret strength | A weak secret behind every API key hash |
+| Out-of-range values (`PORT=abc`, `WORKER_CONCURRENCY=0`, `PROCESSOR_FAILURE_RATE=1.5`, `RETENTION_DAYS=-1`) → exit 1 | Numeric validation | Nonsense values producing confusing behaviour later instead of a clear error now |
+| Config error output never contains the invalid **value** | Secrets stay out of logs | A malformed master key printed in a startup error |
+| Optional variables unset → documented defaults apply | Defaults table (§1.6) | Defaults drifting away from the docs |
+
+### App wiring
+
+| Test | Checks | Edge case guarded |
+|---|---|---|
+| `GET /health` → `200 {"status":"ok"}` | Liveness endpoint | – |
+| Unknown route → `404` JSON error body with `requestId` | Error model applies everywhere | Express's default HTML 404 page revealing the framework |
+| Every response (success or error) has an `X-Request-Id` header | Request ID middleware runs first | Errors thrown before routing (e.g. invalid JSON) having no ID |
+| Building the app (`createApp`) starts no timers and opens no port | `app.ts` / `server.ts` split (§1.7) | Tests accidentally starting background loops or binding port 3000 |
+| Port already in use → `fatal` log + exit 1 | Startup failure handling | A process that stays alive without listening |
+
+### Background loops
+
+| Test | Checks | Edge case guarded |
+|---|---|---|
+| After `close()`, no further tick runs | Loops stop cleanly | A tick firing during shutdown and writing after the lock is released |
+| `SIGTERM` to a running server (process test) → stops accepting, finishes queued transactions, removes the lock, exits 0 | Graceful shutdown | Losing an in-flight commit on every deploy or restart |
+| Process killed with `SIGKILL` mid-job, then restarted → job reclaimed after its lease and completed | Durable jobs (§1.4) | Work lost when the process dies without warning |

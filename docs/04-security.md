@@ -222,7 +222,7 @@ A webhook URL makes **our server** send requests to an address the merchant chos
 Rules, checked when an endpoint is **registered** and again **before every delivery**:
 
 1. The scheme must be `https`.
-2. The hostname is resolved, and **every** resulting IP must be public. Rejected: loopback (`127.0.0.0/8`, `::1`), private (`10/8`, `172.16/12`, `192.168/16`, `fc00::/7`), link-local (`169.254/16`, `fe80::/10`), `0.0.0.0`, and multicast.
+2. The hostname is resolved, and **every** resulting IP must be public. Rejected: loopback (`127.0.0.0/8`, `::1`), private (`10/8`, `172.16/12`, `192.168/16`, `fc00::/7`), link-local (`169.254/16`, `fe80::/10`), `0.0.0.0`, and multicast. IPv4 addresses written in other forms are normalised before checking, e.g. IPv4-mapped IPv6 (`::ffff:127.0.0.1`) and numeric forms (`2130706433`, `0x7f.1`), since all of these reach the same loopback address.
 3. Redirects are **not followed**. A 3xx response counts as a failed attempt.
 4. Timeout of 10 s, and response bodies are ignored beyond 1 KB.
 
@@ -280,3 +280,83 @@ const handle = await open(tmpFile, 'w', 0o600);
 The service listens on plain HTTP and expects a **reverse proxy** (nginx, Caddy, a cloud load balancer) to terminate TLS in front of it.
 
 **Why:** certificate management, renewal and TLS configuration are better handled by tools built for it, and it keeps the service simple. **Never expose the service directly to the internet over plain HTTP**: API keys and card numbers travel in requests.
+
+## 4.13 Tests
+
+### Encryption (unit)
+
+| Test | Checks | Edge case guarded |
+|---|---|---|
+| Encrypt → decrypt returns the original, for empty, ASCII and multi-byte UTF-8 strings | Round trip | Encoding bugs corrupting card numbers or secrets |
+| Encrypting the same value twice → two different ciphertexts | A fresh random IV every time | IV reuse, which breaks GCM's security |
+| Flipping one byte of the ciphertext, the tag or the IV → `SecurityError` | Tampering is detected | Corrupted or tampered data being returned as if valid |
+| Decrypting with a different AAD (another record ID or field) → `SecurityError` | AAD binding (§4.4) | A ciphertext copied from card A into card B |
+| Unknown key version (`v9:…`) or a malformed string → `SecurityError` | Format validation | A crash, or a confusing error, on bad data |
+| Data encrypted under `v1`, then `v2` added and made active → old data still decrypts, new data is written as `v2` | Key rotation | Rotation making existing data unreadable |
+
+### Hashing and fingerprints (unit)
+
+| Test | Checks | Edge case guarded |
+|---|---|---|
+| Same card number → same fingerprint. Different numbers → different fingerprints | Deterministic, keyed hash | Duplicate detection failing |
+| Same number under a different `HASHING_SECRET` → different fingerprint | The hash is keyed | Fingerprints being guessable from a leaked file |
+| The `api-key-hash` and `card-fingerprint` sub-keys differ | Domain separation | One kind of hash standing in for the other |
+| Comparing hashes of **different lengths** returns `false` without throwing | `timingSafeEqual` wrapper | `timingSafeEqual` throws on a length mismatch, which would turn into a 500 |
+
+### API keys and authentication
+
+| Test | Checks | Edge case guarded |
+|---|---|---|
+| Generated keys match the documented format. 1,000 generated keys are all unique | Key format, randomness | – |
+| Unknown key ID, wrong secret, revoked key, malformed header, `Basic` scheme, missing header → all `401` with **identical bodies** (apart from `requestId`) | One answer for every failure (§4.3) | Response differences revealing which key IDs exist |
+| Publishable key on any secret-only route → `403`. Secret key on `POST /tokens` → allowed | Key-type permissions | A public key doing more than tokenizing |
+| After sign-up, the DB file doesn't contain the secret part of the `sk` | Secret keys stored only as hashes | A leaked file exposing usable keys |
+
+### Rotation
+
+| Test | Checks | Edge case guarded |
+|---|---|---|
+| Rotate `secret` → new key works. The old key gets `401` on the very next request | Immediate revocation | A suspected-leaked key still working |
+| Rotate the secret key **using that same key** → response with the new key arrives, then the old key gets `401` | Self-rotation | The caller locking itself out before getting the new key |
+| 5 simultaneous rotations of the same type → exactly **one** active key of that type afterwards | Revoke + create in one transaction | Ending with zero or two active keys |
+| Rotate with a publishable key → `403` | Rotation requires the secret key | A public key replacing the merchant's keys |
+
+### Merchant isolation
+
+| Test | Checks | Edge case guarded |
+|---|---|---|
+| Merchant B calls GET / PATCH / capture / refund / cancel / DELETE on merchant A's payment, card and webhook IDs → `404`, **identical** to a made-up ID | Structural isolation (§4.6) | Seeing or changing another merchant's data, or confirming it exists |
+| B's list endpoints never include A's records | Scoped reads | A list query leaking across merchants |
+| B pays with A's `cardId` → `404`. With A's token → the same `400` as an unknown token | Isolation for card sources | Charging another merchant's customer's card |
+| A and B use the same `Idempotency-Key` → independent results | Keys scoped per merchant | One merchant receiving a replay of another merchant's response |
+
+### SSRF (fake DNS resolver)
+
+| Test | Checks | Edge case guarded |
+|---|---|---|
+| Table of rejected URLs: `http://…`, `https://127.0.0.1`, `https://localhost`, `https://[::1]`, `10.0.0.1`, `172.16.0.1`, `192.168.1.1`, `169.254.169.254`, `[fc00::1]`, `0.0.0.0`, `[::ffff:127.0.0.1]`, `2130706433`, `0x7f.1` → registration rejected | Every rule in §4.8, including alternative IP forms | Reaching internal services or cloud metadata through a disguised address |
+| Hostname resolving to **several** IPs, one private → rejected | "Every resulting IP must be public" | A mixed DNS answer slipping through |
+| Registered when public; resolver switched to a private IP before delivery → delivery blocked, counted as a failure | Re-check at delivery | DNS rebinding |
+| Receiver responds `302` to an internal URL → not followed, counted as a failure | No redirects | SSRF through a redirect |
+| With `WEBHOOK_ALLOW_INSECURE_URLS=true` → `http://localhost` accepted | Explicit development opt-in | – |
+
+### Rate limits
+
+| Test | Checks | Edge case guarded |
+|---|---|---|
+| 6th sign-up from one IP within an hour → `429` with `Retry-After` | Sign-up limit | Mass account creation through open sign-up |
+| 61st `POST /tokens` in a minute with one key → `429`. Another merchant's key isn't affected | Per-key limit | Card testing through the public key, or one merchant affecting another |
+
+### Secrets at rest and file permissions
+
+| Test | Checks | Edge case guarded |
+|---|---|---|
+| After creating a webhook endpoint, the DB file doesn't contain the `whsec_` value | Signing secrets encrypted | Plain-text secrets in the file |
+| On Linux/macOS: DB file mode is `0600`, directory `0700`. A file changed to `0644` by hand is back to `0600` after the next commit (skipped on Windows, where permissions are ACL-based) | §4.11 | Permissions drifting after a manual change |
+
+### Webhook signature helper (unit)
+
+| Test | Checks | Edge case guarded |
+|---|---|---|
+| The [§6.6 verification example](06-webhooks.md#66-verifying-signatures) accepts our own signed delivery | Signer and verifier agree | Docs showing code that doesn't work |
+| Body changed by one byte, wrong secret, timestamp 301 s old, missing `v1` → rejected | Each verification step | Forged or replayed webhooks being accepted |

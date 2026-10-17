@@ -84,7 +84,9 @@ A payment needs a card from **exactly one** of three sources:
 | Saved card | `cardId: "card_…"` | Merchant server, for a returning customer | No CVC is needed: it was checked when the card was saved, and it's never stored (see [Security §4.5](04-security.md#45-cvc)) |
 | Raw card | `card: { number, expMonth, expYear, cvc }` | Merchant server (secret key only) | For server-side testing and simple integrations |
 
-`saveCard: true` (with a `token` or `card`) also saves the card to the vault, tagged with `customerId` if one is given.
+`saveCard: true` (with a `token` or `card`) also saves the card to the vault, tagged with `customerId` if one is given, **but only if the authorization is approved**. A declined card is discarded like any unsaved card, and `paymentMethod.cardId` is set only once the card is actually saved.
+
+**Why save only on approval:** a card that was just declined (insufficient funds, card declined, expired) is very likely to be declined again. Saving it would give the merchant a "saved card" that doesn't work, and keep encrypted card data that serves no purpose.
 
 **Why three sources instead of tokens only:** tokens are the secure default for real checkouts, but requiring them for every test would mean two calls per payment. Raw cards are allowed **only with the secret key**, so the browser-facing publishable key can never create payments directly.
 
@@ -128,7 +130,7 @@ flowchart LR
     A["Card number arrives<br/>POST /tokens or /payments"] --> B["Validated<br/>Luhn, expiry, CVC format"]
     B --> C["CVC discarded<br/>never written to disk"]
     B --> D["Number encrypted<br/>AES-256-GCM into Card record"]
-    D --> E{"saved?"}
+    D --> E{"Already saved, or<br/>saveCard and approved?"}
     E -->|"no"| F["Deleted right after<br/>authorization"]
     E -->|"yes"| G["Kept encrypted until<br/>DELETE /cards/:id"]
 ```
@@ -235,3 +237,77 @@ type ProcessorResult<T = {}> =
 ```
 
 **Why an interface:** the worker depends on this interface, not on the simulator. A real gateway adapter could be added later without touching the worker.
+
+## 3.6 Tests
+
+Worker tests use the fake clock, `tickOnce()` and the scripted processor described in [Testing strategy §9.3](09-testing.md#93-determinism).
+
+### State machine
+
+| Test | Checks | Edge case guarded |
+|---|---|---|
+| **Every status × every action** (10 statuses × capture/refund/cancel), table-driven: allowed → `202` + transitional status. Disallowed → `409 invalid_state` naming the current status | The "allowed actions" table (§3.2), exhaustively | One forgotten combination letting money move from the wrong state |
+| `PATCH` succeeds in every status, including terminal ones | Labels never lock | – |
+| `PATCH` with `status` or `amount` → 400 naming the field | Status changes only through actions | Bypassing the state machine |
+| Cancel while `pending` → 409 | No cancel during authorization | Race between "cancelled" and "authorized" |
+
+### Creating payments
+
+| Test | Checks | Edge case guarded |
+|---|---|---|
+| No card source → 400. Two sources (`token` + `cardId`) → 400 | Exactly one source | Ambiguity over which card gets charged |
+| `saveCard` with `cardId` → 400 | Rule in [API §5.8](05-api.md#58-payments) | Re-saving an already saved card |
+| Token already used → 400. Expired token (fake clock, +15 min 1 ms) → 400 | Single use + expiry | Replaying a token that leaked from a browser |
+| Another merchant's token → same 400 as an unknown token | Isolation, without revealing that it exists | Learning about other merchants' tokens |
+| Raw `card` with a **publishable** key → 403 | Browsers can't create payments | A public key creating charges directly |
+| Response is `202` with `status: "pending"`. `payment.created` event recorded in the same transaction | Async creation (§3.1) | – |
+
+### Outcomes (scripted processor)
+
+| Test | Checks | Edge case guarded |
+|---|---|---|
+| Automatic capture: `pending` → `capturing` → `captured`. Events `authorized` then `captured`. Two jobs | Two-job automatic capture | Re-authorizing when only the capture failed |
+| Manual capture: `pending` → `authorized`, then capture → `captured` | Manual flow | – |
+| Decline → `failed` with the processor's code. **Exactly one attempt** | Declines aren't retried | Retrying a decline (pointless, and can look like card testing) |
+| Every test card in §3.5 → its documented outcome | Test-card table | Docs and behaviour drifting apart |
+| Card that expires this month, tokenized on the last day; fake clock moves into next month before the worker runs → `expired_card` | Expiry checked at authorization, not only at tokenization | A card expiring between checkout and processing |
+
+### Amounts
+
+| Test | Checks | Edge case guarded |
+|---|---|---|
+| Capture `amount` = authorized amount → OK. `amount + 1` → 400. `0` → 400 | Capture bounds | Capturing more than was authorized |
+| Partial capture of 600/1000, then refund 601 → 400. Refund 600 → `refunded` | Refunds are bounded by **captured**, not authorized, amount | Refunding money that was never taken |
+| Refunds 300 + 300 + 400 of 1000 → `partially_refunded`, `partially_refunded`, `refunded` | Running total | Off-by-one at the final refund |
+| No `amount` on capture/refund → full / remaining amount | Defaults | – |
+| Second capture after a partial capture → 409 | One capture per authorization | Capturing the released remainder |
+
+### Concurrency
+
+| Test | Checks | Edge case guarded |
+|---|---|---|
+| 10 simultaneous full refunds of one payment → exactly **one** `202`, nine `409`. Afterwards `amountRefunded ≤ amountCaptured` | One pending action at a time | Double refund through a race |
+| Refund while `refunding` → 409 | Same rule, sequential | – |
+| 20 due jobs, `WORKER_CONCURRENCY=5`, processor in blocking mode → never more than **5** calls in flight | Concurrency limit | The worker overwhelming the processor or memory |
+| A slow tick (blocking processor) and another `tickOnce()` → second tick doesn't run concurrently | No overlapping ticks | Two ticks together claiming more than the limit |
+
+### Retries, leases and recovery
+
+| Test | Checks | Edge case guarded |
+|---|---|---|
+| Transient errors: retries at exactly +2 s, +4 s, +8 s, +16 s (fake clock). Not before | Backoff schedule (§3.4) | Hammering a struggling processor |
+| 5 transient errors on authorize → `failed`, `failure.code = processing_error`, `payment.failed` | Giving up | Retrying forever |
+| Capture fails permanently → back to `authorized`, `payment.action_failed` | Revert, not fail | Marking captured money as failed |
+| Refund fails permanently from `partially_refunded` → back to `partially_refunded` | `previousStatus` restored precisely | Reverting to the wrong status |
+| Job claimed, run never finishes; clock +31 s → job reclaimed and completed. The first run's late result is **discarded** | Lease + ownership check | A stuck job, or the same transition applied twice |
+| Queued jobs in the DB file at startup → processed after restart | Durability | Work lost across restarts |
+
+### Card handling
+
+| Test | Checks | Edge case guarded |
+|---|---|---|
+| Unsaved card deleted after authorization, both on approval **and** on decline | Card data kept no longer than needed | Encrypted card numbers piling up |
+| `saveCard: true` + approval → card saved with `customerId`, `paymentMethod.cardId` set | Save on approval | – |
+| `saveCard: true` + **decline** → card not saved, `cardId` stays `null` | Save only on approval | Saving cards that don't work |
+| After any payment, the DB file contains no CVC used in the request | CVC never stored ([Security §4.5](04-security.md#45-cvc)) | Storing data PCI DSS forbids |
+| `DELETE /cards/:id` while a `pending` payment uses the card → 409. After authorization → 204 | Deletion guard | Deleting the card the worker is about to use |

@@ -16,6 +16,7 @@ A microservice that **simulates** card payment processing. Merchants sign up, ge
 | 6 | [Webhooks](06-webhooks.md) | How events are produced, delivered, retried and verified |
 | 7 | [Persistence](07-persistence.md) | How the JSON file database gives us transactional (ACID-like) behaviour |
 | 8 | [Error handling](08-error-handling.md) | How errors are classified, returned to clients, logged securely, and handled in background processes |
+| 9 | [Testing strategy](09-testing.md) | How tests are structured and kept deterministic. Each doc's **Tests** section lists what's tested and which edge case each test guards |
 
 New to the project? Read 1 → 3 → 5 first. Then read 4, 6, 7 and 8 for the details.
 

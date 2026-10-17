@@ -28,6 +28,7 @@ Endpoints marked **⟳ idempotent** accept an optional `Idempotency-Key` header 
 | Same key, same body | The **stored response is replayed**, with header `Idempotent-Replayed: true` |
 | Same key, different body | `422 idempotency_key_reused` |
 | Same key while the first request is still running | `409 idempotency_in_progress` |
+| Same key, but the first request's reservation is over 60 s old and never completed | Treated as **abandoned**: the request runs normally |
 | First request failed with a **5xx** | **Not stored**: the key is released, so a retry runs again (see [Error handling §8.11](08-error-handling.md#811-errors-and-idempotency)) |
 
 Keys are scoped per merchant **and** per endpoint.
@@ -36,9 +37,21 @@ Keys are scoped per merchant **and** per endpoint.
 
 **Why endpoints that return secrets are *not* idempotent** (`/api-keys/rotate`, `POST /webhooks`, `/webhooks/:id/rotate-secret`): replaying a response means storing it, and those responses contain a plain secret that we deliberately never store.
 
+"Same body" is compared on **canonical JSON** (keys sorted), so `{"a":1,"b":2}` and `{"b":2,"a":1}` count as the same request.
+
+**Why abandon reservations after 60 s:** if the process crashes mid-request, the reservation stays `in_progress`, and without this rule the key would answer `409` for 24 hours to a client that's just trying to retry. No request legitimately takes 60 s.
+
+**Why canonical JSON:** different JSON libraries order keys differently, and a client retrying the *same* request must not get a `422`.
+
+### Unknown fields
+
+Request bodies are validated **strictly**: a field that isn't documented for that endpoint → `400 validation_error` naming the field.
+
+**Why reject instead of ignoring:** a typo like `"ammount"` or `"captureMetod"` would otherwise be silently dropped. The request would succeed with defaults the client never intended, such as capturing immediately instead of manually.
+
 ### Pagination
 
-List endpoints accept `limit` (1–100, default 20) and `offset` (≥ 0, default 0), and return newest first:
+List endpoints accept `limit` (1–100, default 20) and `offset` (≥ 0, default 0), and return newest first. Records with the same `createdAt` are ordered by `id`, so the order is always deterministic:
 
 ```json
 { "data": [ … ], "total": 42, "limit": 20, "offset": 0 }
@@ -342,7 +355,7 @@ Request:
 
 Response `201`: the endpoint plus **`"secret": "whsec_…"`, shown only this once**.
 
-Validation: URL rules in [Security §4.8](04-security.md#48-ssrf-protection-for-webhook-urls); `events` is `["*"]` or a non-empty list of known event types; at most **10 endpoints per merchant**.
+Validation: URL rules in [Security §4.8](04-security.md#48-ssrf-protection-for-webhook-urls); `events` is `["*"]` or a non-empty list of known event types; at most **10 endpoints per merchant** (an 11th → `409 conflict`).
 
 **Why cap at 10:** every event creates one delivery per matching endpoint. Without a cap, one merchant could multiply the write load on the shared database file.
 
@@ -352,11 +365,13 @@ Return endpoints. The secret is **never** included.
 
 ### `PATCH /webhooks/:id`
 
-Any of `url`, `events`, `enabled`, `description`. Disabling (`enabled: false`) stops new deliveries from being created for that endpoint. Deliveries already queued still run.
+Any of `url`, `events`, `enabled`, `description`. Disabling (`enabled: false`) stops new deliveries from being created for that endpoint, **and** pending deliveries to it are marked `failed` ("endpoint disabled") instead of being sent. The events stay available through `GET /events`.
+
+**Why not send deliveries that were already queued:** a merchant usually disables an endpoint because it's broken or being replaced, and sending to it anyway would surprise them. Nothing is lost: the events can be fetched for reconciliation.
 
 ### `DELETE /webhooks/:id` → `204`
 
-Pending deliveries to that endpoint are cancelled.
+Pending deliveries to that endpoint are marked `failed` ("endpoint deleted") and not sent.
 
 ### `POST /webhooks/:id/rotate-secret` → `200`
 
@@ -390,3 +405,70 @@ Pending deliveries to that endpoint are cancelled.
 Events are kept for `RETENTION_DAYS` (default 7).
 
 **Why an events API when webhooks exist:** webhooks can be missed (receiver down, all retries exhausted). The events list lets a merchant **reconcile**: fetch everything since their last processed event and catch up.
+
+## 5.11 Tests
+
+These are API-level tests: the real app over HTTP. Payment states are tested in [Lifecycle §3.6](03-payment-lifecycle.md#36-tests), security rules in [Security §4.13](04-security.md#413-tests), webhooks in [Webhooks §6.8](06-webhooks.md#68-tests).
+
+### Auth matrix and status codes
+
+| Test | Checks | Edge case guarded |
+|---|---|---|
+| **Every endpoint × {no key, pk, sk}**, table-driven, against the index in §5.2 | Auth column of the endpoint index | An endpoint added without auth, or with the wrong key type |
+| `/health` and `POST /merchants` work with no key, and ignore a key if one is sent | Public endpoints | – |
+| Every endpoint returns its documented success status (`200`/`201`/`202`/`204`) | Status codes | A `200` where clients expect a `202`, and clients misreading the outcome |
+| The body of each success response matches the documented example's keys | Response shapes | Docs and responses drifting apart |
+
+### Request validation
+
+| Test | Checks | Edge case guarded |
+|---|---|---|
+| Unknown body field (e.g. `ammount`) → 400 naming it, on every endpoint that has a body | Strict validation | Typos silently ignored |
+| Body that isn't a JSON object (`[]`, `"x"`, `null`) → 400 | Top-level shape | A crash on unexpected JSON types |
+| Missing or non-JSON `Content-Type` with a body → 400 | Body parsing | A request processed with an empty body |
+| Body over 100 kb → `413` | Size limit | Memory exhaustion via huge bodies |
+| Repeated query parameter (`?status=a&status=b`) → 400 | Query validation | An array arriving where a string is expected |
+
+### Pagination
+
+| Test | Checks | Edge case guarded |
+|---|---|---|
+| `limit` 1 and 100 accepted. 0, 101, `abc`, `1.5` → 400 | Bounds | Unbounded responses |
+| `offset` beyond `total` → empty `data` with the correct `total` | Paging past the end | An error, or a wrong total, on the last page |
+| 25 records created within the same millisecond → paging through all pages returns each **exactly once**, in a stable order | `id` as a tie-breaker | Records skipped or repeated between pages |
+
+### Idempotency
+
+| Test | Checks | Edge case guarded |
+|---|---|---|
+| Same key + same body → same status and body, with `Idempotent-Replayed: true`. Only one payment exists | Replay | Double charge on retry |
+| Same key + same fields in a different key order → replay, not 422 | Canonical JSON | Spurious 422s from different JSON libraries |
+| Same key + different body → `422` | Misuse detection | Replaying a response for a different request |
+| Same key while the first is still running (blocking processor) → `409 idempotency_in_progress` | In-progress guard | Two requests both doing the work |
+| Reservation left `in_progress` (simulated crash), clock +61 s → the retry runs | Abandoned reservations | A key blocked for 24 h after a crash |
+| Same key on two different endpoints → independent | Per-endpoint scope | A refund replaying a capture's response |
+| Key reused after 24 h (fake clock) → processed again | Expiry | – |
+| First request fails with a 5xx → the retry runs again | 5xx not stored ([Error handling §8.11](08-error-handling.md#811-errors-and-idempotency)) | A permanent replay of a temporary failure |
+
+### Merchants, tokens and cards
+
+| Test | Checks | Edge case guarded |
+|---|---|---|
+| Sign-up returns both keys, and they work immediately | Sign-up | – |
+| `GET /api-keys` shows the full `pk` but only the last 4 characters of the `sk` | Key listing | Secret keys exposed after creation |
+| Token response contains `brand`/`last4`, never the number or CVC | Token view | Card data echoed back to the browser |
+| Token for an already-expired card → 400. Number failing Luhn → 400. `cvc` of 2 or 5 digits → 400 | Token validation | Obviously invalid cards reaching the worker |
+| Same card saved twice for the same `customerId` → second call `200` with the **same** card. For a different `customerId` → a new card | Duplicate detection (§5.7) | Duplicate cards in a customer's wallet, or cards merged across customers |
+| Same card saved twice with **no** `customerId` → deduplicated within the "no customer" group | `null` handled like any other value | Duplicates when merchants don't use customer IDs |
+| `DELETE` the same card twice → `204`, then `404` | Deletion | – |
+| `GET /cards?customerId=x` returns only that customer's cards | Filter | – |
+
+### Payments and webhook endpoints
+
+| Test | Checks | Edge case guarded |
+|---|---|---|
+| `PATCH` metadata merge: `null` deletes, new keys are added, existing keys are overwritten. A merge that would exceed 20 keys → 400. Empty body → 400 | Merge rules | The 20-key cap bypassed through repeated merges |
+| `GET /payments?status=…&customerId=…` filters correctly, and combined filters intersect | Filters | – |
+| 11th webhook endpoint → `409 conflict` | Endpoint cap | Write amplification from unlimited endpoints |
+| `POST /webhooks` returns `secret` once. `GET` never includes it | Secret shown once | Secret readable later via the API |
+| `GET /events?type=payment.captured` returns only that type, newest first | Events filter | – |

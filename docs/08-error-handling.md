@@ -331,13 +331,60 @@ Requests rejected *before* the idempotency step (401, 403, 429, invalid JSON) ne
 
 ## 8.12 Testing the error paths
 
-| Test | Checks |
-|---|---|
-| **Log leak test** | The whole API test suite runs with console output captured. Afterwards, no captured line may contain a test card number, a CVC used in the tests, or any `sk_`, `pk_` or `whsec_` value issued during the run |
-| Error handler | Each error class gives the documented status, `code` and body. A thrown `TypeError` gives a generic 500 with no message or stack in the body |
-| Malformed JSON with a card number in it | The response is `invalid_json`, and neither the response nor the log contains the number |
-| Job handler that throws | The job is retried, then fails, and the payment reverts. The loop keeps processing other jobs |
-| Storage failure (simulated, e.g. read-only temp dir) | 503 + `Retry-After`, state unchanged, recovers once writable again |
-| 5xx with `Idempotency-Key` | A retry with the same key runs again instead of replaying the 500 |
+### Error handler and client contract
+
+| Test | Checks | Edge case guarded |
+|---|---|---|
+| Each `AppError` class → its documented status, `code`, `details` and `Retry-After` (429/503) | Classification (§8.2) | Codes drifting from the docs |
+| Route throws a `TypeError` with a message containing a card number → generic `500 internal_error`. The body has no message, stack or number | Bugs revealed to nobody (§8.4) | Internal details or secrets in error responses |
+| `SecurityError` → generic `500`. The log entry has `security: true` and no ciphertext | Security events | Telling an attacker that tampering was detected |
+| Malformed JSON containing a card number → `400 invalid_json`. Neither the response nor the log contains the number | Library messages dropped | The JSON parser quoting the body back |
+| Validation error for an invalid card number → `details` names `card.number` but doesn't include the value | Values never echoed | Secrets in validation messages |
+| Error thrown **after** the response headers were sent → logged, connection closed, the process keeps running | `headersSent` branch | A crash, or a garbled second response |
+| Async route handler that rejects → reaches the error handler (no hanging request) | Express 5 async forwarding | Requests that never get a response |
+
+### Request IDs
+
+| Test | Checks | Edge case guarded |
+|---|---|---|
+| Valid incoming `X-Request-Id` → reused in the response header, error body and logs | Proxy correlation (§8.5) | – |
+| Incoming ID with invalid characters, newlines, or over 64 chars → replaced by a generated one | Validation | Log injection through a header |
+| A job created by a request logs the same `requestId` | Correlation across async work | Not being able to trace a payment from request to worker |
+
+### Logger and redaction (unit)
+
+| Test | Checks | Edge case guarded |
+|---|---|---|
+| Each level goes to its documented console method. `LOG_LEVEL=warn` suppresses `info` and `debug` | Levels (§8.6) | Errors going to stdout, or noise ignoring the level |
+| Every entry is a single line of valid JSON, even when a message contains newlines | Line format | Entries split across lines and broken apart |
+| Each layer-1 key (`authorization`, `card`, `cvc`, `secret`, …) is redacted at any depth, case-insensitively | Key redaction (§8.7) | Known sensitive fields logged |
+| Each layer-2 pattern (`sk_`/`pk_` keys, `whsec_`, `Bearer`, Luhn-valid card numbers, ciphertext) is masked inside plain strings, error messages **and** stack traces | Pattern redaction | Secrets hidden inside free text |
+| A 13-digit timestamp and an amount like `100000` are **not** masked | The Luhn check limits false positives | Useful log data destroyed |
+| Circular object, depth 10, 1 MB string → logged as `[Circular]`, cut off at depth 6, truncated at 2,000 chars, without throwing | Logging is robust | Logging itself crashing or flooding the console |
+| 401, 403 and 429 responses are logged at `warn`. Other 4xx at `info`. 5xx at `error` | Level by status | Attack signals buried, or 4xx noise counted as errors |
+
+### Background and process failures
+
+| Test | Checks | Edge case guarded |
+|---|---|---|
+| Job handler throws → retried with backoff, then the payment fails or reverts. Other jobs in the same tick complete | Per-job catch (§8.8) | One bad job stalling the queue |
+| The claim step throws in a tick → `error` logged, and the next `tickOnce()` works normally | Per-tick catch | A loop that dies after one exception |
+| Decryption failure in the worker → no retry, payment `failed` with `processing_error`, `security: true` log | Security events in jobs | Retrying tampered data, or revealing the cause |
+| Receiver returns 500 → `warn`, not `error` | Merchant-side failures | Our error log filling with merchants' problems |
+| Spawned server with a route that triggers an unhandled rejection → `fatal` log, lock removed, exit code 1 | Fatal handling (§8.9) | Running on in a broken state, or dying without a trace |
+| Spawned server whose shutdown is made to hang → killed after 10 s with exit code 1 | Hard timeout | A half-dead process that never exits |
+
+### Storage and idempotency
+
+| Test | Checks | Edge case guarded |
+|---|---|---|
+| Storage failure during a request → `503` + `Retry-After: 30`, state unchanged. Recovers once writable, without a restart | Storage failures (§8.10) | Crash loops over a full disk |
+| A 5xx response to a request with an `Idempotency-Key` → the retry with the same key runs again | §8.11 | Replaying a temporary failure forever |
+
+### Suite-wide
+
+| Test | Checks | Edge case guarded |
+|---|---|---|
+| **Log leak test**: all console output from the whole suite is captured, and no line may contain a test card number, a test CVC, or any `sk_`, `pk_` or `whsec_` value issued during the run | Nothing sensitive ever logged ([Testing §9.5](09-testing.md#95-tests-that-span-the-whole-suite)) | A new log line or error field leaking data |
 
 **Why a dedicated leak test:** redaction is easy to break without noticing. A new log line, or a new field in an error, can leak without any functional test failing. Scanning every line produced by the full suite catches this automatically.
