@@ -2,6 +2,7 @@ import { cards } from './cards.ts';
 import { foundation } from './foundation.ts';
 import { startSmokeServer, type SmokeContext } from './harness.ts';
 import { merchants } from './merchants.ts';
+import { payments } from './payments.ts';
 import { ratelimits } from './ratelimits.ts';
 
 /**
@@ -15,12 +16,14 @@ const SCENARIOS: Record<string, (s: SmokeContext) => Promise<void>> = {
   foundation,
   merchants,
   cards,
+  payments,
   ratelimits,
 };
 
 const requested = process.argv.slice(2);
 const names = requested.length ? requested : Object.keys(SCENARIOS);
 if (requested.length && !requested.includes('merchants') && requested.some((n) => n !== 'foundation')) names.unshift('merchants');
+if (requested.includes('payments') && !names.includes('cards')) names.splice(names.indexOf('merchants') + 1, 0, 'cards');
 const unknown = names.filter((n) => !SCENARIOS[n]);
 if (unknown.length) {
   console.error(`Unknown scenario(s): ${unknown.join(', ')}. Available: ${Object.keys(SCENARIOS).join(', ')}`);
@@ -32,6 +35,9 @@ const server = await startSmokeServer({
   RATE_LIMIT_SIGNUP_PER_HOUR: '40',
   RATE_LIMIT_TOKENS_PER_MINUTE: '120',
   RATE_LIMIT_GENERAL_PER_MINUTE: '600',
+  // Chaos mode: PROCESSOR_FAILURE_RATE=0.3 yarn smoke  (random transient processor failures; some
+  // final-state checks may then legitimately fail, but the server must never crash or leak).
+  ...(process.env.PROCESSOR_FAILURE_RATE ? { PROCESSOR_FAILURE_RATE: process.env.PROCESSOR_FAILURE_RATE } : {}),
 });
 console.log(`Smoke testing the real server at ${server.ctx.baseUrl}`);
 try {

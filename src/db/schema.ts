@@ -142,7 +142,8 @@ export interface StoredEvent {
   id: string;
   merchantId: string;
   type: EventType;
-  data: { object: Record<string, unknown> };
+  /** `action` is present on payment.action_failed: which action failed and why. */
+  data: { object: Record<string, unknown>; action?: { type: JobType; code: string; message: string } };
   createdAt: string;
 }
 

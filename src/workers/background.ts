@@ -1,5 +1,7 @@
 import type { AppContext } from '../app.js';
+import { createSimulatedProcessor } from '../processor/simulatedProcessor.js';
 import type { Services } from '../services.js';
+import { createPaymentWorker } from './paymentWorker.js';
 
 /** A background loop (payment worker, webhook dispatcher, housekeeping). */
 export interface BackgroundLoop {
@@ -7,6 +9,8 @@ export interface BackgroundLoop {
   /** Runs one pass. Exposed so tests can drive loops deterministically (docs/09-testing.md §9.3). */
   tickOnce(): Promise<void>;
   start(): void;
+  /** Resolves when work started by earlier ticks (e.g. in-flight jobs) has finished. */
+  whenIdle(): Promise<void>;
   /** Stops scheduling ticks and waits for the current one (and its in-flight work) to finish. */
   stop(): Promise<void>;
 }
@@ -51,6 +55,10 @@ export function createPollingLoop(options: {
   return {
     name: options.name,
     tickOnce: runTick,
+    async whenIdle() {
+      await current;
+      await options.drain?.();
+    },
     start() {
       if (running) return;
       running = true;
@@ -65,9 +73,14 @@ export function createPollingLoop(options: {
   };
 }
 
-/** Starts every background loop. Modules add their loops here as they are implemented. */
-export function startBackgroundLoops(_ctx: AppContext, _services: Services): BackgroundLoop[] {
-  const loops: BackgroundLoop[] = [];
+/** Starts every background loop. */
+export function startBackgroundLoops(ctx: AppContext, services: Services): BackgroundLoop[] {
+  const processor = createSimulatedProcessor({
+    latencyMs: ctx.config.processorLatencyMs,
+    failureRate: ctx.config.processorFailureRate,
+    clock: ctx.clock,
+  });
+  const loops: BackgroundLoop[] = [createPaymentWorker(ctx, services, processor)];
   for (const loop of loops) loop.start();
   return loops;
 }

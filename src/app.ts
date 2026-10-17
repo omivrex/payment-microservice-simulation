@@ -17,6 +17,7 @@ import { apiKeysOpenApi, apiKeysRouter } from './modules/apiKeys/routes.js';
 import { healthOpenApi, healthRouter } from './modules/health/routes.js';
 import { cardsOpenApi, cardsRouter } from './modules/cards/routes.js';
 import { merchantsOpenApi, merchantsRouter } from './modules/merchants/routes.js';
+import { paymentsOpenApi, paymentsRouter } from './modules/payments/routes.js';
 import { tokensOpenApi, tokensRouter } from './modules/tokens/routes.js';
 import { createServices, type Services } from './services.js';
 
@@ -55,6 +56,7 @@ export function createApp(ctx: AppContext, services: Services = createServices(c
     { router: apiKeysRouter(deps), openapi: apiKeysOpenApi },
     { router: tokensRouter(deps), openapi: tokensOpenApi },
     { router: cardsRouter(deps), openapi: cardsOpenApi },
+    { router: paymentsRouter(deps), openapi: paymentsOpenApi },
   ];
   const openapi = buildOpenApiDocument(modules.map((m) => m.openapi));
 

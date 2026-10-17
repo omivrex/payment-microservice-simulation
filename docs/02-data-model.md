@@ -276,7 +276,10 @@ interface Event {
   id: string;                     // evt_…
   merchantId: string;
   type: EventType;
-  data: { object: PaymentView };  // snapshot of the payment at the moment of the event
+  data: {
+    object: PaymentView;          // snapshot of the payment at the moment of the event
+    action?: { type: 'capture' | 'refund' | 'cancel'; code: string; message: string }; // only on payment.action_failed
+  };
   createdAt: string;
 }
 ```
@@ -349,7 +352,7 @@ Internal fields are **never** returned. Each module has a `toView()` function th
 |---|---|
 | ApiKey | `secretHash` |
 | Card | `numberEncrypted`, `fingerprint` |
-| Payment | `sourceCardId`, `saveCardOnApproval`, `merchantId` |
+| Payment | `sourceCardId`, `saveCardOnApproval`, `merchantId`, and `pendingAction.jobId` / `pendingAction.previousStatus` (the public `pendingAction` is `{ type, amount, requestedAt }`) |
 | WebhookEndpoint | `secretEncrypted` (the plain secret is returned once, at creation or rotation) |
 
 **Why an explicit `toView()` instead of deleting fields from the stored object:** with an allow-list, a field added later is hidden by default until someone deliberately exposes it. A block-list would leak new fields by default.

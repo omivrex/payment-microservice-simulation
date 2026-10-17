@@ -11,7 +11,11 @@ import { Encryptor } from '../../src/crypto/encryption.ts';
 import { Hasher } from '../../src/crypto/hashing.ts';
 import { JsonDb } from '../../src/db/jsonDb.ts';
 import { createLogger } from '../../src/logging/logger.ts';
+import type { Processor } from '../../src/processor/processor.ts';
+import { createSimulatedProcessor } from '../../src/processor/simulatedProcessor.ts';
 import { createServices, type Services } from '../../src/services.ts';
+import type { BackgroundLoop } from '../../src/workers/background.ts';
+import { createPaymentWorker } from '../../src/workers/paymentWorker.ts';
 import { testConfig } from './config.ts';
 import { FakeClock } from './fakeClock.ts';
 import { findLeaks, registerSecret } from './leakGuard.ts';
@@ -37,11 +41,18 @@ export interface TestApp {
   services: Services;
   clock: FakeClock;
   dir: string;
+  worker: BackgroundLoop;
+  /** One worker pass, then wait for the jobs it started. */
+  runWorker(): Promise<void>;
+  /** Runs worker passes until no job is due at the current (fake) time. */
+  settle(maxPasses?: number): Promise<void>;
   api<T = any>(method: string, urlPath: string, options?: RequestOptions): Promise<ApiResponse<T>>;
   close(): Promise<void>;
 }
 
-export async function startTestApp(options: { config?: Partial<Config>; buildContext?: (ctx: AppContext) => AppContext } = {}): Promise<TestApp> {
+export async function startTestApp(
+  options: { config?: Partial<Config>; buildContext?: (ctx: AppContext) => AppContext; processor?: Processor } = {},
+): Promise<TestApp> {
   const dir = await mkdtemp(path.join(tmpdir(), 'payment-service-test-'));
   const config = testConfig({ dbFile: path.join(dir, 'db.json'), ...options.config });
   const logger = createLogger({ level: config.logLevel });
@@ -59,6 +70,22 @@ export async function startTestApp(options: { config?: Partial<Config>; buildCon
   if (options.buildContext) ctx = options.buildContext(ctx);
 
   const services = createServices(ctx);
+  const processor = options.processor ?? createSimulatedProcessor({ latencyMs: 0, failureRate: 0, clock });
+  const worker = createPaymentWorker(ctx, services, processor);
+  const runWorker = async () => {
+    await worker.tickOnce();
+    await worker.whenIdle();
+  };
+  const settle = async (maxPasses = 20) => {
+    for (let i = 0; i < maxPasses; i++) {
+      const now = clock.now().toISOString();
+      const due = db.scanMerchants((_m, d) =>
+        Object.values(d.jobs).filter((j) => (j.status === 'queued' && j.runAt <= now) || (j.status === 'running' && (j.lockedUntil ?? '') < now)),
+      );
+      if (due.length === 0) return;
+      await runWorker();
+    }
+  };
   const server: Server = createApp(ctx, services).listen(0, '127.0.0.1');
   await once(server, 'listening');
   const baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
@@ -90,8 +117,12 @@ export async function startTestApp(options: { config?: Partial<Config>; buildCon
     services,
     clock,
     dir,
+    worker,
+    runWorker,
+    settle,
     api,
     async close() {
+      await worker.stop();
       server.closeAllConnections();
       await new Promise<void>((resolve) => server.close(() => resolve()));
       await db.close();
