@@ -29,8 +29,9 @@ export function findLeaks(text: string): string[] {
     if (digitsOnly.includes(pan)) leaks.push(`test card ending ${pan.slice(-4)}`);
   }
   for (const secret of issuedSecrets) {
-    const secretPart = secret.split('_').at(-1)!;
-    if (text.includes(secret) || (secretPart.length >= 20 && text.includes(secretPart))) {
+    // base64url can contain '_', so take the random part by fixed position.
+    const secretPart = secret.startsWith('whsec_') ? secret.slice(6) : secret.slice('sk_test_'.length + 17);
+    if (text.includes(secret) || text.includes(secretPart)) {
       leaks.push(`issued secret ${secret.slice(0, 8)}…`);
     }
   }

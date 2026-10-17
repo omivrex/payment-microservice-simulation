@@ -7,6 +7,7 @@ import { Encryptor } from './crypto/encryption.js';
 import { Hasher } from './crypto/hashing.js';
 import { JsonDb } from './db/jsonDb.js';
 import { StartupError } from './errors.js';
+import { createServices } from './services.js';
 import { createLogger, type Logger } from './logging/logger.js';
 import { startBackgroundLoops, type BackgroundLoop } from './workers/background.js';
 
@@ -75,7 +76,8 @@ async function main(): Promise<void> {
     hasher: new Hasher(config.hashingSecret),
   };
 
-  const app = createApp(ctx);
+  const services = createServices(ctx);
+  const app = createApp(ctx, services);
   server = app.listen(config.port);
   await new Promise<void>((resolve, reject) => {
     server!.once('listening', resolve);
@@ -85,7 +87,7 @@ async function main(): Promise<void> {
   const port = typeof address === 'object' && address ? address.port : config.port;
   logger.info('payment service listening', { port, dbFile: config.dbFile });
 
-  loops = startBackgroundLoops(ctx);
+  loops = startBackgroundLoops(ctx, services);
 }
 
 main().catch((err: unknown) => {

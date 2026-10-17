@@ -242,6 +242,8 @@ In-memory limits per window:
 | `POST /tokens` | 60 / minute | API key | Publishable keys are public, so anyone can call this. The limit stops using the endpoint to test stolen card numbers (*card testing*) |
 | Everything else | 300 / minute | API key | General protection against runaway clients |
 
+The limits are configurable (`RATE_LIMIT_SIGNUP_PER_HOUR`, `RATE_LIMIT_TOKENS_PER_MINUTE`, `RATE_LIMIT_GENERAL_PER_MINUTE`), with the values above as defaults. **Why configurable:** smoke tests and demos need more than 5 sign-ups an hour, and operators may need to tune limits without a code change.
+
 **Why in-memory:** the service is a single process (see [Persistence](07-persistence.md#710-limitations)), so there's no need for a shared store like Redis. Limits reset on restart, which is acceptable for a simulator.
 
 ## 4.10 Logging and redaction

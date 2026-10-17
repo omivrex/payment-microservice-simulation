@@ -1,4 +1,5 @@
 import type { AppContext } from '../app.js';
+import type { Services } from '../services.js';
 
 /** A background loop (payment worker, webhook dispatcher, housekeeping). */
 export interface BackgroundLoop {
@@ -65,7 +66,7 @@ export function createPollingLoop(options: {
 }
 
 /** Starts every background loop. Modules add their loops here as they are implemented. */
-export function startBackgroundLoops(_ctx: AppContext): BackgroundLoop[] {
+export function startBackgroundLoops(_ctx: AppContext, _services: Services): BackgroundLoop[] {
   const loops: BackgroundLoop[] = [];
   for (const loop of loops) loop.start();
   return loops;

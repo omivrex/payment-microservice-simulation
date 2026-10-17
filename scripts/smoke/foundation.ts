@@ -72,5 +72,5 @@ export async function foundation(s: SmokeContext): Promise<void> {
       return false;
     }
   }));
-  s.check('access log lines carry requestId and route pattern', /"msg":"request completed","requestId":"req_[0-9a-f]{32}","method":"GET","route":"\/health"/.test(s.serverOutput()));
+  s.check('access log lines carry requestId and route pattern', await s.logMatches(/"msg":"request completed","requestId":"req_[0-9a-f]{32}","method":"GET","route":"\/health"/));
 }

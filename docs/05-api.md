@@ -68,6 +68,8 @@ See the [error model in Architecture](01-architecture.md#18-error-model). Every 
 | Method | Path | Auth | ⟳ | Purpose |
 |---|---|---|:-:|---|
 | GET | `/health` | none | | Liveness check |
+| GET | `/openapi.json` | none | | OpenAPI 3.1 document for every endpoint |
+| GET | `/docs` | none | | Swagger UI (interactive API docs) |
 | POST | `/merchants` | none | | Sign up, receive first key pair |
 | GET | `/merchants/me` | sk | | Current merchant |
 | GET | `/api-keys` | sk | | List keys |

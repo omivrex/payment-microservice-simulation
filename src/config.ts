@@ -19,6 +19,11 @@ export interface Config {
   retentionDays: number;
   dbWarnSizeMb: number;
   logLevel: LogLevel;
+  rateLimits: {
+    signupPerHour: number;
+    tokensPerMinute: number;
+    generalPerMinute: number;
+  };
 }
 
 type Env = Record<string, string | undefined>;
@@ -120,6 +125,11 @@ export function loadConfig(env: Env = process.env): Config {
     retentionDays: int('RETENTION_DAYS', 7, 1, 3650),
     dbWarnSizeMb: int('DB_WARN_SIZE_MB', 20, 1, 100_000),
     logLevel: rawLevel as LogLevel,
+    rateLimits: {
+      signupPerHour: int('RATE_LIMIT_SIGNUP_PER_HOUR', 5, 1, 1_000_000),
+      tokensPerMinute: int('RATE_LIMIT_TOKENS_PER_MINUTE', 60, 1, 1_000_000),
+      generalPerMinute: int('RATE_LIMIT_GENERAL_PER_MINUTE', 300, 1, 1_000_000),
+    },
   };
 
   if (problems.length > 0) {

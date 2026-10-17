@@ -22,6 +22,7 @@ export function testConfig(overrides: Partial<Config> = {}): Config {
     retentionDays: 7,
     dbWarnSizeMb: 20,
     logLevel: 'debug',
+    rateLimits: { signupPerHour: 10_000, tokensPerMinute: 10_000, generalPerMinute: 100_000 },
     ...overrides,
   };
 }

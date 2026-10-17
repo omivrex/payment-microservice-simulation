@@ -39,6 +39,8 @@ export interface SmokeContext {
   issuedSecrets: Set<string>;
   sleep(ms: number): Promise<void>;
   waitUntil<T>(label: string, fn: () => Promise<T | undefined | false>, timeoutMs?: number): Promise<T | undefined>;
+  /** Log lines are written when a response closes, just after the client sees it, so poll briefly. */
+  logMatches(pattern: RegExp, timeoutMs?: number): Promise<boolean>;
 }
 
 export interface SmokeServer {
@@ -141,6 +143,14 @@ export async function startSmokeServer(extraEnv: Record<string, string> = {}): P
       ctx.check(`server still healthy after: ${label}`, ok);
     },
     sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
+    async logMatches(pattern, timeoutMs = 2000) {
+      const end = Date.now() + timeoutMs;
+      while (Date.now() < end) {
+        if (pattern.test(output)) return true;
+        await new Promise((r) => setTimeout(r, 25));
+      }
+      return pattern.test(output);
+    },
     async waitUntil(label, fn, timeoutMs = 10_000) {
       const end = Date.now() + timeoutMs;
       while (Date.now() < end) {
@@ -170,11 +180,14 @@ export async function startSmokeServer(extraEnv: Record<string, string> = {}): P
 
 const CARDS = ['4242424242424242', '5555555555554444', '4000000000000002', '4000000000009995', '4000000000000069', '4000000000000127', '4000000000000119'];
 
+/** The random part of a key: base64url may itself contain '_', so slice by fixed position. */
+export const secretPart = (key: string): string => (key.startsWith('whsec_') ? key.slice(6) : key.slice('sk_test_'.length + 17));
+
 function scanForLeaks(ctx: SmokeContext, where: string, text: string): void {
   const flat = text.replace(/[ -]/g, '');
   const leaks: string[] = [];
   for (const pan of CARDS) if (flat.includes(pan)) leaks.push(`card …${pan.slice(-4)}`);
-  for (const s of ctx.issuedSecrets) if (text.includes(s) || text.includes(s.split('_').at(-1)!)) leaks.push(`${s.slice(0, 8)}…`);
+  for (const s of ctx.issuedSecrets) if (text.includes(s) || text.includes(secretPart(s))) leaks.push(`${s.slice(0, 8)}…`);
   if (/"cvc"\s*:\s*"\d{3,4}"/.test(text)) leaks.push('CVC');
   ctx.check(`no card numbers, CVCs or secrets in the ${where}`, leaks.length === 0, leaks);
 }

@@ -11,6 +11,7 @@ import { Encryptor } from '../../src/crypto/encryption.ts';
 import { Hasher } from '../../src/crypto/hashing.ts';
 import { JsonDb } from '../../src/db/jsonDb.ts';
 import { createLogger } from '../../src/logging/logger.ts';
+import { createServices, type Services } from '../../src/services.ts';
 import { testConfig } from './config.ts';
 import { FakeClock } from './fakeClock.ts';
 import { findLeaks, registerSecret } from './leakGuard.ts';
@@ -33,6 +34,7 @@ export interface RequestOptions {
 export interface TestApp {
   baseUrl: string;
   ctx: AppContext;
+  services: Services;
   clock: FakeClock;
   dir: string;
   api<T = any>(method: string, urlPath: string, options?: RequestOptions): Promise<ApiResponse<T>>;
@@ -56,7 +58,8 @@ export async function startTestApp(options: { config?: Partial<Config>; buildCon
   };
   if (options.buildContext) ctx = options.buildContext(ctx);
 
-  const server: Server = createApp(ctx).listen(0, '127.0.0.1');
+  const services = createServices(ctx);
+  const server: Server = createApp(ctx, services).listen(0, '127.0.0.1');
   await once(server, 'listening');
   const baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
 
@@ -84,6 +87,7 @@ export async function startTestApp(options: { config?: Partial<Config>; buildCon
   return {
     baseUrl,
     ctx,
+    services,
     clock,
     dir,
     api,

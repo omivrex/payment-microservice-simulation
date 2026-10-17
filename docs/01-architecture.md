@@ -150,6 +150,9 @@ All configuration comes from environment variables. The service **refuses to sta
 | `RETENTION_DAYS` | no | `7` | How long completed jobs, events and deliveries are kept |
 | `DB_WARN_SIZE_MB` | no | `20` | Log a warning when the database file outgrows the design capacity (see [Persistence §7.9](07-persistence.md#79-performance-and-capacity)) |
 | `LOG_LEVEL` | no | `info` | Minimum log level: `debug`, `info`, `warn`, `error`, `fatal` (see [Error handling §8.6](08-error-handling.md#86-server-logging)) |
+| `RATE_LIMIT_SIGNUP_PER_HOUR` | no | `5` | Sign-ups per IP per hour (see [Security §4.9](04-security.md#49-rate-limiting)) |
+| `RATE_LIMIT_TOKENS_PER_MINUTE` | no | `60` | `POST /tokens` calls per API key per minute |
+| `RATE_LIMIT_GENERAL_PER_MINUTE` | no | `300` | All other authenticated calls per API key per minute |
 
 **Why fail fast on startup:** a payment service running with a missing encryption key would either crash on the first card, or worse, store data it can never decrypt. Failing at boot makes a misconfiguration obvious right away.
 
