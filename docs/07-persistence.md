@@ -95,6 +95,73 @@ sequenceDiagram
 
 Serial execution sounds slow, but each transaction is a few in-memory operations plus one file write (about a millisecond for a small file). Slow work (processor calls, webhook HTTP requests) always happens *outside* transactions, so the queue never waits on the network.
 
+### Concurrent writes
+
+A common worry with a single-file database: *if a merchant sign-up, a payment and a webhook delivery all write at the same moment, will one of them grab the file and make the others fail?*
+
+**No.** None of them touch the file directly. The API handlers, the payment worker and the webhook dispatcher all run **inside the same process** and share **one `JsonDb` instance**. Every write goes through `transact()`, which puts it in an **in-memory queue**. The queue runs transactions one at a time, in arrival order, and only the queue writes to the file.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant A as POST /merchants
+    participant B as POST /payments
+    participant W as Webhook dispatcher
+    participant Q as JsonDb write queue
+    participant F as db.json
+
+    A->>Q: transact(create merchant)
+    B->>Q: transact(create payment)
+    W->>Q: transact(mark delivery succeeded)
+    Note over Q: All three arrive at about the same time.<br/>None are rejected: they wait their turn.
+    Q->>F: commit A (temp file + rename, about 1-3 ms)
+    Q-->>A: resolved
+    Q->>F: commit B (starts from state after A)
+    Q-->>B: resolved
+    Q->>F: commit W (starts from state after A and B)
+    Q-->>W: resolved
+```
+
+Each transaction starts from the state left by the **previous commit**, not from when it was queued:
+
+```mermaid
+flowchart LR
+    S0["State v0"] -->|"A: + merchant"| S1["State v1"]
+    S1 -->|"B: + payment, job, event"| S2["State v2"]
+    S2 -->|"W: delivery = succeeded"| S3["State v3"]
+    S3 -->|"one file write per step"| F[("db.json")]
+```
+
+| Concern | What happens | Why |
+|---|---|---|
+| Does a write fail because another one is in progress? | **No**. It waits for its turn | The queue is a promise chain: a new transaction is attached to the end of it, never refused |
+| How long does it wait? | Milliseconds | A transaction is in-memory changes plus one file write. Slow work is kept *outside* transactions (see [Lifecycle §3.4](03-payment-lifecycle.md#34-the-payment-worker)), so the queue never waits on the network |
+| Can two writes overwrite each other (lost update)? | **No** | The draft copy is made when a transaction **starts**, after the previous one has committed, so B always sees A's changes |
+| Can one failing write block the others? | **No** | A transaction that throws (a broken business rule, even a disk error) rejects only its own caller. The queue catches the failure and moves on |
+| Is the file ever open for writing by two things at once? | **No** | Only the queue writes, and it writes a temp file and then renames it, one commit at a time |
+
+```mermaid
+flowchart TD
+    T["Transaction reaches the front of the queue"] --> D["draft = copy of committed state"]
+    D --> M{"Mutator succeeds?"}
+    M -->|"yes"| C["Write temp file, fsync, rename"]
+    C --> OK["committed = draft<br/>resolve caller"]
+    M -->|"no: throws"| X["Discard draft<br/>reject only this caller"]
+    C -->|"disk error"| X
+    OK --> N["Next transaction"]
+    X --> N
+```
+
+**Writers outside the process** are handled separately:
+
+| Source | Protection |
+|---|---|
+| A second instance of the service on the same file | The lock file makes it refuse to start (§7.7) |
+| Antivirus, a search indexer or an editor briefly opening `db.json` (mostly Windows) | The rename is retried on `EPERM`/`EBUSY` (§7.6) |
+| Someone editing `db.json` by hand while the service runs | Not supported: the in-memory state overwrites the file on the next commit. Stop the service before editing the file |
+
+**Why a queue instead of file locks:** OS file locking works differently on every platform (advisory on Linux/macOS, mandatory on Windows), and a writer that finds the file locked has to either fail or retry. A queue inside the process removes the contention completely, so no write ever has to handle "file busy". This only works because one process owns the data. Splitting the service into several processes would need a different database (§7.10).
+
 ## 7.5 Durability details and trade-offs
 
 | Step | Purpose |
