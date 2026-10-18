@@ -155,7 +155,7 @@ ENCRYPTION_ACTIVE_KEY_ID=v2
 
 To rotate the master key:
 
-1. Generate a new key (`yarn gen:secrets`) and add it as `v2` **alongside** `v1`.
+1. Generate a new key (`openssl rand -base64 32`) and add it as `v2` **alongside** `v1`. (`yarn gen:secrets` deliberately won't do this: it never replaces existing keys without `--force`, and `--force` replaces them all.)
 2. Set `ENCRYPTION_ACTIVE_KEY_ID=v2` and restart. New data uses `v2`, and old data still decrypts with `v1`.
 3. Run `yarn reencrypt` (with the service stopped) to rewrite every `v1` ciphertext as `v2`.
 4. Remove `v1` from `ENCRYPTION_KEYS`.

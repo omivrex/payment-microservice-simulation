@@ -199,7 +199,7 @@ After the scenarios, every run checks:
 
 ```bash
 yarn install
-cp .env.example .env && yarn gen:secrets   # paste the 3 lines into .env
+yarn gen:secrets                            # creates .env with placeholder secrets
 yarn test                                   # all automated tests
 yarn smoke                                  # real server, every scenario (about 2 min)
 PROCESSOR_FAILURE_RATE=0.3 yarn smoke       # chaos mode

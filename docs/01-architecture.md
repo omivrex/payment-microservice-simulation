@@ -156,7 +156,7 @@ All configuration comes from environment variables. The service **refuses to sta
 
 **Why fail fast on startup:** a payment service running with a missing encryption key would either crash on the first card, or worse, store data it can never decrypt. Failing at boot makes a misconfiguration obvious right away.
 
-**Why environment variables:** this is the standard way to pass secrets to a process without committing them to the repository (the [twelve-factor](https://12factor.net/config) approach). A `yarn gen:secrets` script prints freshly generated values to paste into a local `.env` file.
+**Why environment variables:** this is the standard way to pass secrets to a process without committing them to the repository (the [twelve-factor](https://12factor.net/config) approach). `yarn gen:secrets` creates `.env` (from `.env.example`) with randomly generated **placeholder** secrets and a comment explaining they should be replaced with your own random values. It never overwrites existing keys unless run with `--force`, because changing keys on an existing database makes stored card numbers and webhook secrets unreadable and invalidates every issued secret API key.
 
 ## 1.7 Project layout
 
