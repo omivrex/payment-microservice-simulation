@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawn, type ChildProcess } from 'node:child_process';
+import { createServer } from 'node:net';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, it } from 'node:test';
@@ -113,6 +114,31 @@ describe('README: webhook receiver script and registration', () => {
     await app.runDispatcher();
     assert.equal(deliveries(ep.body.id)[0]!.status, 'succeeded');
   });
+
+  for (const [label, host] of [
+    ['another program on 127.0.0.1 only (like the Firebase emulator)', '127.0.0.1'],
+    ['another program on all addresses', '::'],
+  ] as const) {
+    it(`port already in use by ${label} → refuses to start, exit 1, tells you to use a free port`, async () => {
+      const blocker = createServer().listen(0, host);
+      await new Promise((r) => blocker.once('listening', r));
+      try {
+        const port = (blocker.address() as { port: number }).port;
+        const child = spawn(process.execPath, ['-e', SCRIPT!], { env: { PATH: process.env.PATH, PORT: String(port) }, stdio: ['ignore', 'pipe', 'pipe'] });
+        children.push(child);
+        let out = '';
+        child.stdout!.on('data', (d) => (out += d));
+        child.stderr!.on('data', (d) => (out += d));
+        const code = await new Promise((r) => child.once('exit', r));
+        assert.equal(code, 1);
+        assert.match(out, new RegExp(`Port ${port} is already in use by another program`));
+        assert.match(out, /Start the receiver on a free port, e\.g\. PORT=4001, and register that URL/);
+        assert.ok(!out.includes('Receiver listening'), 'must not claim to be listening');
+      } finally {
+        blocker.close();
+      }
+    });
+  }
 
   it('registering an http://localhost URL without WEBHOOK_ALLOW_INSECURE_URLS → 400 "must use https"', async () => {
     const secure = await startTestApp({ config: { webhookAllowInsecureUrls: false } });

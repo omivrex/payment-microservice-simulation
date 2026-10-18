@@ -93,13 +93,28 @@ const server = http.createServer((req, res) => {
     res.writeHead(200).end("ok");
   });
 });
-server.listen(port, () => console.log(`Receiver listening on http://localhost:${server.address().port}${path}`));
+// Refuse to start if another program already uses this port: deliveries would go to it, not here.
+const portTaken = () => {
+  console.error(`Port ${port} is already in use by another program, so webhook deliveries would go there instead of here.`);
+  console.error(`Start the receiver on a free port, e.g. PORT=4001, and register that URL.`);
+  process.exit(1);
+};
+const isTaken = (host) => new Promise((resolve) => {
+  const probe = require("net").createServer();
+  probe.once("error", (err) => resolve(err.code === "EADDRINUSE"));
+  probe.listen(port, host, () => probe.close(() => resolve(false)));
+});
+(async () => {
+  if (Number(port) !== 0 && ((await isTaken("127.0.0.1")) || (await isTaken("::1")))) portTaken();
+  server.on("error", (err) => (err.code === "EADDRINUSE" ? portTaken() : console.error(err)));
+  server.listen(port, () => console.log(`Receiver listening on http://localhost:${server.address().port}${path}`));
+})();
 '
 ```
 
 It prints `Receiver listening on http://localhost:4000/webhooks/payments`. **That printed URL is the one to register.**
 
-The path and port are your choice. To use a different path, set it before `node`, for example `WEBHOOK_PATH=/api/pms/payment PORT=5000 node -e '…'`. The receiver then prints `http://localhost:5000/api/pms/payment`. If port 4000 is taken (`EADDRINUSE`), pick another one with `PORT`.
+The path and port are your choice. To use a different path, set it before `node`, for example `WEBHOOK_PATH=/api/pms/payment PORT=5000 node -e '…'`. The receiver then prints `http://localhost:5000/api/pms/payment`. If the port is already used by another program, the receiver refuses to start and says so (otherwise deliveries would silently go to that program and get `404`). Start it on a free port with `PORT`, and register the URL it prints.
 
 **b) Register the URL** the receiver printed:
 
