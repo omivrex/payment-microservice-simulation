@@ -178,7 +178,7 @@ Scenarios run in this order. Later ones reuse the merchant created by `merchants
 | A real local receiver gets `payment.created`, `payment.authorized` and `payment.captured` | Receiver that never answers → `"timeout"` after ~10 s |
 | Every delivery verifies with an **independently written** HMAC check; `Webhook-Id`/`Webhook-Event` headers match the event | A tampered body fails verification; deleting an endpoint removes its delivery log |
 | `data.object` is the payment as it was at that moment | Unknown event type, `"*"` mixed with types, empty list, `javascript:`/`file:` URLs, credentials in the URL, a 3 kb URL → all `400` |
-| `GET /events?type=payment.captured` includes the payment | 11th endpoint → `409`; another merchant can't read, change or rotate my endpoint, or see my events |
+| `GET /events?type=payment.captured` includes the payment | Registering the same URL again, even with different case or a `#fragment` → `409`; 6th endpoint → `409`; another merchant can't read, change or rotate my endpoint, or see my events |
 | `rotate-secret` → new deliveries verify with the new secret and **fail** with the old one | **A second server in secure mode** rejects private targets using real DNS: `http://`, `localhost`, `127.0.0.1`, `10.x`, `192.168.x`, cloud metadata `169.254.169.254`, `[::1]`, `[::ffff:127.0.0.1]`, `2130706433`, `0x7f.1`, `0.0.0.0` |
 
 #### `ratelimits`: limits under flood (runs last)

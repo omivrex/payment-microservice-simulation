@@ -302,6 +302,8 @@ interface WebhookEndpoint {
 }
 ```
 
+**Why `url` is unique per merchant (stored normalized):** two endpoints with the same URL would receive every event twice. Storing the normalized form (lowercase scheme and host, no default port, no `#fragment`) makes the uniqueness check a plain string comparison. A merchant can have at most **5** endpoints (see [API §5.9](05-api.md#59-webhooks)).
+
 **Why the signing secret is encrypted, not hashed:** unlike an API key, the service needs the **original** secret every time it signs a delivery. A hash can't be reversed, so encryption is the only option. See [Security](04-security.md#what-is-protected-and-how).
 
 ### WebhookDelivery

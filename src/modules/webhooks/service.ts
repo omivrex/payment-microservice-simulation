@@ -8,7 +8,12 @@ import { newId } from '../../ids.js';
 import { paginate, type Page } from '../../http/validate.js';
 import { assertSafeWebhookUrl, UnsafeUrlError, type HostResolver } from './ssrf.js';
 
-export const MAX_ENDPOINTS_PER_MERCHANT = 10;
+/**
+ * At most 5 endpoints per merchant. Every event creates one delivery per matching endpoint, and every
+ * delivery is a write to the single database file plus an outbound request, so this caps the per-event
+ * fan-out. See docs/05-api.md §5.9.
+ */
+export const MAX_ENDPOINTS_PER_MERCHANT = 5;
 
 export interface WebhookEndpointView {
   id: string;
@@ -59,6 +64,7 @@ export class WebhooksService {
       updatedAt: now,
     };
     await this.db.transact(merchantId, (d) => {
+      assertUrlNotRegistered(d, url, null);
       if (Object.keys(d.webhookEndpoints).length >= MAX_ENDPOINTS_PER_MERCHANT) {
         throw new ConflictError(`A merchant can have at most ${MAX_ENDPOINTS_PER_MERCHANT} webhook endpoints`);
       }
@@ -89,7 +95,10 @@ export class WebhooksService {
     const now = isoNow(this.clock);
     return this.db.transact(merchantId, (d) => {
       const endpoint = findEndpoint(d, id);
-      if (url !== undefined) endpoint.url = url;
+      if (url !== undefined) {
+        assertUrlNotRegistered(d, url, id);
+        endpoint.url = url;
+      }
       if (input.events !== undefined) endpoint.events = input.events;
       if (input.description !== undefined) endpoint.description = input.description;
       if (input.enabled !== undefined) {
@@ -135,11 +144,27 @@ export class WebhooksService {
 
   async #checkUrl(raw: string): Promise<string> {
     try {
-      return (await assertSafeWebhookUrl(raw, { allowInsecure: this.options.allowInsecureUrls, resolver: this.options.resolver })).toString();
+      const url = await assertSafeWebhookUrl(raw, { allowInsecure: this.options.allowInsecureUrls, resolver: this.options.resolver });
+      url.hash = ''; // never sent in a request, so it can't make two URLs different
+      return url.toString(); // normalized: lowercase scheme/host, default port removed (used for uniqueness)
     } catch (err) {
       if (err instanceof UnsafeUrlError) throw new ValidationError([{ field: 'url', message: err.message }]);
       throw err;
     }
+  }
+}
+
+/**
+ * One endpoint per URL per merchant (disabled endpoints included): two endpoints with the same URL would
+ * receive every event twice. URLs are compared in normalized form (see #checkUrl). Checked inside the
+ * transaction, so two simultaneous registrations can't both succeed.
+ */
+function assertUrlNotRegistered(d: MerchantData, url: string, exceptId: string | null): void {
+  const existing = Object.values(d.webhookEndpoints).find((e) => e.url === url && e.id !== exceptId);
+  if (existing) {
+    throw new ConflictError(
+      `A webhook endpoint with this URL already exists (${existing.id}). To receive different events at this URL, update that endpoint's "events" instead.`,
+    );
   }
 }
 

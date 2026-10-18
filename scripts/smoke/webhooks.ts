@@ -111,10 +111,14 @@ export async function webhooks(s: SmokeContext): Promise<void> {
       const r = await s.call('POST', '/webhooks', { key: sk, body });
       s.check(`${label} → 400`, r.status === 400, r.status);
     }
+    const dup = await s.call('POST', '/webhooks', { key: sk, body: { url: rx.url('/all'), events: ['payment.failed'] } });
+    s.check('registering the same URL again → 409 naming the existing endpoint', dup.status === 409 && dup.body.error.message.includes(ep.body.id), dup.body);
+    const dupNormalized = await s.call('POST', '/webhooks', { key: sk, body: { url: rx.url('/all').replace('http://127.0.0.1', 'HTTP://127.0.0.1') + '#frag', events: ['*'] } });
+    s.check('same URL with different case / #fragment → still 409 (compared normalized)', dupNormalized.status === 409);
     const existing = (await s.call('GET', '/webhooks', { key: sk })).body.data.length;
     const created: number[] = [];
-    for (let i = existing; i < 11; i++) created.push((await s.call('POST', '/webhooks', { key: sk, body: { url: rx.url(`/n${i}`), events: ['payment.failed'] } })).status);
-    s.check('11th endpoint → 409 conflict', created.at(-1) === 409 && created.slice(0, -1).every((c) => c === 201), created);
+    for (let i = existing; i < 6; i++) created.push((await s.call('POST', '/webhooks', { key: sk, body: { url: rx.url(`/n${i}`), events: ['payment.failed'] } })).status);
+    s.check('6th endpoint → 409 conflict (limit of 5 per merchant)', created.at(-1) === 409 && created.slice(0, -1).every((c) => c === 201), created);
 
     const other = await s.call('POST', '/merchants', { body: { name: 'Hook Snoop', email: `hooksnoop-${Date.now()}@smoke.test` } });
     const otherSk = other.body.apiKeys.secret;

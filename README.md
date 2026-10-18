@@ -108,7 +108,7 @@ curl -s -X POST localhost:3000/webhooks -H "authorization: Bearer $SK" -H 'conte
   -d '{"url":"http://localhost:4000/webhooks/payments","events":["*"]}'
 ```
 
-**The registered URL must match the receiver's path exactly.** The service POSTs to exactly the URL you register. If the paths differ, the receiver answers `404` and prints the path it actually received. To fix a mismatch, `PATCH /webhooks/{id}` with the right `url`.
+**The registered URL must match the receiver's path exactly.** The service POSTs to exactly the URL you register. If the paths differ, the receiver answers `404` and prints the path it actually received. To fix a mismatch, `PATCH /webhooks/{id}` with the right `url`. Each URL can be registered only **once** per merchant (registering it again → `409`), and a merchant can have at most **5** endpoints.
 
 From the response, keep `id` (`we_…`), which you'll need for the delivery log, and `secret` (`whsec_…`), which is **shown only once** and is needed to verify signatures (see [Verifying webhooks](#verifying-webhooks)). More detail and a troubleshooting table: [docs/06-webhooks.md §6.6](docs/06-webhooks.md#66-receiving-and-verifying-webhooks).
 

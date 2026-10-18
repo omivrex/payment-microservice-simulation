@@ -23,7 +23,10 @@ afterEach(async () => {
   await app.close();
 });
 
-const register = (body: Record<string, unknown>, key = m.sk) => app.api('POST', '/webhooks', { key, body: { url: receiver.url(), events: ['*'], ...body } });
+// Each registration gets its own path: a URL can only be registered once per merchant.
+let hookPath = 0;
+const register = (body: Record<string, unknown>, key = m.sk) =>
+  app.api('POST', '/webhooks', { key, body: { url: receiver.url(`/hook-${++hookPath}`), events: ['*'], ...body } });
 const pay = (body: Record<string, unknown> = {}) => app.api('POST', '/payments', { key: m.sk, body: { amount: 1000, currency: 'usd', card: card(), ...body } });
 const deliveries = (endpointId: string) => app.ctx.db.read(m.id, (d) => Object.values(d.webhookDeliveries).filter((x) => x.endpointId === endpointId));
 const nowSeconds = () => Math.floor(app.clock.now().getTime() / 1000);
@@ -62,11 +65,87 @@ describe('§5.9 webhook endpoint management', () => {
     assert.deepEqual(res.body.events, ['payment.captured']);
   });
 
-  it('11th endpoint → 409 conflict', async () => {
-    for (let i = 0; i < 10; i++) assert.equal((await register({ description: `#${i}` })).status, 201);
+  it('6th endpoint → 409 conflict (limit of 5 per merchant)', async () => {
+    for (let i = 0; i < 5; i++) assert.equal((await register({ description: `#${i}` })).status, 201);
     const res = await register({});
     assert.equal(res.status, 409);
     assert.equal(res.body.error.code, 'conflict');
+    assert.match(res.body.error.message, /at most 5 webhook endpoints/);
+  });
+
+  it('deleting an endpoint frees a slot', async () => {
+    const ids: string[] = [];
+    for (let i = 0; i < 5; i++) ids.push((await register({})).body.id);
+    await app.api('DELETE', `/webhooks/${ids[0]}`, { key: m.sk });
+    assert.equal((await register({})).status, 201);
+  });
+
+  it('the same URL twice → 409 naming the existing endpoint; only one endpoint exists', async () => {
+    const url = receiver.url('/dup');
+    const first = await register({ url });
+    const second = await register({ url, events: ['payment.captured'] });
+    assert.equal(second.status, 409);
+    assert.equal(second.body.error.code, 'conflict');
+    assert.ok(second.body.error.message.includes(first.body.id), 'names the existing endpoint');
+    assert.match(second.body.error.message, /update that endpoint's "events"/);
+    assert.equal((await app.api('GET', '/webhooks', { key: m.sk })).body.data.length, 1);
+  });
+
+  it('URLs are compared normalized: host case, default port and #fragment do not make a new URL', async () => {
+    const base = await register({ url: 'http://localhost:80/norm' });
+    assert.equal(base.body.url, 'http://localhost/norm', 'stored normalized');
+    for (const variant of ['HTTP://LOCALHOST/norm', 'http://localhost/norm#section', 'http://LocalHost:80/norm']) {
+      assert.equal((await register({ url: variant })).status, 409, variant);
+    }
+    for (const different of ['http://localhost/norm/', 'http://localhost/norm?x=1', 'http://localhost:8080/norm', 'http://localhost/NORM']) {
+      assert.equal((await register({ url: different })).status, 201, `${different} is a different URL`);
+    }
+  });
+
+  it('a disabled endpoint still holds its URL', async () => {
+    const url = receiver.url('/disabled-dup');
+    const ep = await register({ url });
+    await app.api('PATCH', `/webhooks/${ep.body.id}`, { key: m.sk, body: { enabled: false } });
+    assert.equal((await register({ url })).status, 409);
+  });
+
+  it('after deleting an endpoint its URL can be registered again', async () => {
+    const url = receiver.url('/reuse');
+    const ep = await register({ url });
+    await app.api('DELETE', `/webhooks/${ep.body.id}`, { key: m.sk });
+    assert.equal((await register({ url })).status, 201);
+  });
+
+  it('PATCH to a URL another endpoint uses → 409; PATCH keeping its own URL → 200', async () => {
+    const a = await register({ url: receiver.url('/a') });
+    const b = await register({ url: receiver.url('/b') });
+    const clash = await app.api('PATCH', `/webhooks/${b.body.id}`, { key: m.sk, body: { url: receiver.url('/a') } });
+    assert.equal(clash.status, 409);
+    assert.ok(clash.body.error.message.includes(a.body.id));
+    const same = await app.api('PATCH', `/webhooks/${a.body.id}`, { key: m.sk, body: { url: receiver.url('/a'), description: 'same url' } });
+    assert.equal(same.status, 200);
+  });
+
+  it('5 simultaneous registrations of one URL → exactly one 201', async () => {
+    const url = receiver.url('/race');
+    const results = await Promise.all(Array.from({ length: 5 }, () => register({ url })));
+    assert.deepEqual(results.map((r) => r.status).sort(), [201, 409, 409, 409, 409]);
+  });
+
+  it('two merchants may register the same URL (uniqueness is per merchant)', async () => {
+    const url = receiver.url('/shared');
+    const other = await createMerchant(app);
+    assert.equal((await register({ url })).status, 201);
+    assert.equal((await register({ url }, other.sk)).status, 201);
+  });
+
+  it('each event is delivered once per URL', async () => {
+    const url = receiver.url('/once');
+    await register({ url, events: ['payment.created'] });
+    await register({ url, events: ['payment.created'] }); // rejected duplicate
+    await pay();
+    await app.runDispatcher();
+    assert.equal(receiver.requests.filter((r) => r.path === '/once').length, 1);
   });
 
   it('PATCH updates fields; empty PATCH → 400; another merchant → 404 everywhere', async () => {

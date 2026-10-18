@@ -124,7 +124,7 @@ export const webhooksOpenApi: OpenApiModule = {
         description:
           'URLs must be https and resolve only to public addresses (private, loopback, link-local and reserved ranges are rejected; ' +
           'relaxed with WEBHOOK_ALLOW_INSECURE_URLS=true for local development). ' +
-          `At most ${MAX_ENDPOINTS_PER_MERCHANT} endpoints per merchant. Deliveries are signed: ` +
+          `At most ${MAX_ENDPOINTS_PER_MERCHANT} endpoints per merchant, and each URL only once (to receive different events at one URL, update that endpoint\'s events). Deliveries are signed: ` +
           '`Webhook-Signature: t=<unix>,v1=<hex HMAC-SHA256(secret, "<t>.<raw body>")>`. Verify with the secret only (no API key needed).',
         security: secretKeyAuth,
         requestBody: jsonBody({
@@ -144,7 +144,7 @@ export const webhooksOpenApi: OpenApiModule = {
           '400': commonErrors['400'],
           '401': commonErrors['401'],
           '403': commonErrors['403'],
-          '409': errorResponse(`\`conflict\`: already ${MAX_ENDPOINTS_PER_MERCHANT} endpoints`),
+          '409': errorResponse(`\`conflict\`: this URL is already registered (the message names the existing endpoint), or the merchant already has ${MAX_ENDPOINTS_PER_MERCHANT} endpoints`),
           '429': commonErrors['429'],
           '503': commonErrors['503'],
         },
@@ -176,7 +176,7 @@ export const webhooksOpenApi: OpenApiModule = {
           additionalProperties: false,
           properties: { url: { type: 'string' }, events: eventsOpenApi, enabled: { type: 'boolean' }, description: { type: ['string', 'null'] } },
         }),
-        responses: { '200': jsonResponse('Updated endpoint', ref('WebhookEndpoint')), '400': commonErrors['400'], '401': commonErrors['401'], '404': errorResponse('Unknown endpoint') },
+        responses: { '200': jsonResponse('Updated endpoint', ref('WebhookEndpoint')), '400': commonErrors['400'], '401': commonErrors['401'], '404': errorResponse('Unknown endpoint'), '409': errorResponse('`conflict`: another endpoint already uses this URL') },
       },
       delete: {
         summary: 'Delete an endpoint (pending deliveries are marked failed, not sent)',

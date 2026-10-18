@@ -365,9 +365,15 @@ Local development example, using the receiver script from the README walkthrough
 
 **The URL must be the exact address your receiver handles, path included.** The service POSTs to exactly this URL. A receiver that doesn't handle the path answers `404`, and the delivery log (`GET /webhooks/{id}/deliveries`) shows `lastResponseStatus: 404`. Step-by-step setup and troubleshooting: [Webhooks §6.6](06-webhooks.md#66-receiving-and-verifying-webhooks).
 
-Validation: URL rules in [Security §4.8](04-security.md#48-ssrf-protection-for-webhook-urls); `events` is `["*"]` or a non-empty list of known event types; at most **10 endpoints per merchant** (an 11th → `409 conflict`).
+Validation:
+- URL rules in [Security §4.8](04-security.md#48-ssrf-protection-for-webhook-urls).
+- `events` is `["*"]` or a non-empty list of known event types.
+- **Each URL can be registered only once per merchant.** Registering it again → `409 conflict`, and the message names the existing endpoint. Disabled endpoints count, and the same check applies when `PATCH` changes an endpoint's URL. URLs are compared in normalized form: scheme and host are case-insensitive, a default port (`:80`/`:443`) is ignored, and a `#fragment` is dropped. Path, query string and trailing slash do count, so `/hooks` and `/hooks/` are different URLs.
+- **At most 5 endpoints per merchant.** A 6th → `409 conflict`. Deleting an endpoint frees its slot.
 
-**Why cap at 10:** every event creates one delivery per matching endpoint. Without a cap, one merchant could multiply the write load on the shared database file.
+**Why each URL only once:** two endpoints with the same URL would receive **every event twice**. To receive more (or different) events at a URL, update that endpoint's `events` with `PATCH /webhooks/{id}` instead of registering it again. Different merchants may register the same URL, because uniqueness is per merchant.
+
+**Why a limit of 5:** every event creates one delivery per matching endpoint, and each delivery is a write to the shared database file plus an outbound HTTP request. With 5 endpoints, one payment's ~3 events produce at most 15 deliveries. The limit bounds that fan-out, so one merchant can't multiply the write and network load for everyone (see [Persistence §7.9](07-persistence.md#79-performance-and-capacity)). Five covers typical needs (for example, separate receivers for fulfilment, accounting and analytics), and `["*"]` lets one endpoint receive everything.
 
 ### `GET /webhooks` · `GET /webhooks/:id`
 
@@ -479,6 +485,7 @@ These are API-level tests: the real app over HTTP. Payment states are tested in 
 |---|---|---|
 | `PATCH` metadata merge: `null` deletes, new keys are added, existing keys are overwritten. A merge that would exceed 20 keys → 400. Empty body → 400 | Merge rules | The 20-key cap bypassed through repeated merges |
 | `GET /payments?status=…&customerId=…` filters correctly, and combined filters intersect | Filters | – |
-| 11th webhook endpoint → `409 conflict` | Endpoint cap | Write amplification from unlimited endpoints |
+| 6th webhook endpoint → `409 conflict`; deleting one frees a slot | Endpoint limit of 5 | Write amplification from unlimited endpoints |
+| Same URL registered twice, or `PATCH`ed onto another endpoint's URL → `409` naming the existing endpoint; case, default port and `#fragment` variants are also `409`; a different path, query or trailing slash is allowed; a disabled endpoint still holds its URL; 5 simultaneous registrations → exactly one `201`; another merchant may use the same URL | URL uniqueness per merchant | Every event delivered twice to the same receiver |
 | `POST /webhooks` returns `secret` once. `GET` never includes it | Secret shown once | Secret readable later via the API |
 | `GET /events?type=payment.captured` returns only that type, newest first | Events filter | – |
