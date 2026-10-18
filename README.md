@@ -49,6 +49,8 @@ The server reads `.env` automatically. Data is stored in `data/db.json` (`DB_FIL
 | `yarn reencrypt` | Re-encrypts stored data with the active key (master-key rotation step; stop the server first) |
 | `yarn typecheck` | TypeScript check |
 
+What each smoke scenario covers (happy paths and the edge cases it attacks) is listed in [docs/09-testing.md §9.8](docs/09-testing.md#98-smoke-tests).
+
 ## Manual walkthrough (curl)
 
 Start the server with `WEBHOOK_ALLOW_INSECURE_URLS=true` and `PROCESSOR_LATENCY_MS=300`, then:

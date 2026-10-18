@@ -12,6 +12,7 @@ This document describes **how** the service is tested. **What** is tested lives 
 | `webhooks` and `events` modules, webhook dispatcher | [Webhooks §6.8](06-webhooks.md#68-tests) |
 | `JsonDb` | [Persistence §7.12](07-persistence.md#712-tests) |
 | Errors, logger, redaction, process failures | [Error handling §8.12](08-error-handling.md#812-testing-the-error-paths) |
+| Everything together, against the real running server | [Smoke tests §9.8](#98-smoke-tests) |
 
 **Why keep test lists next to the design instead of in one big test plan:** when someone changes a design decision, the tests that prove it are on the same page. That makes it obvious which tests need updating, and lets a reviewer check each "why" against a test that enforces it.
 
@@ -92,13 +93,130 @@ Two checks run over the output of the **entire suite**, not one feature:
 | `yarn test` | Everything |
 | `yarn test:unit` / `test:integration` / `test:api` / `test:process` | One level |
 | `yarn test:coverage` | Everything, with a coverage report |
+| `yarn smoke` | Smoke tests against the real running server (§9.8). Separate from `yarn test` because it starts a real process and takes about 2 minutes |
 | `yarn bench:db` | The `JsonDb` benchmark ([Persistence §7.9](07-persistence.md#79-performance-and-capacity)). A measurement, not a test, so it isn't part of `yarn test` |
 
 **Coverage target:** ≥ 90% of lines in `src/modules`, `src/db`, `src/crypto` and `src/logging`, which hold the logic and security-critical code. Coverage is reported, not used as a gate.
 
 **Why not gate on coverage:** a hard threshold encourages tests that run code without checking anything. The doc-linked test lists are the real definition of "tested enough". Coverage only highlights code that no listed test reaches.
 
-## 9.8 What isn't tested, and why
+## 9.8 Smoke tests
+
+### What they are for
+
+The automated tests in §9.1–9.7 are precise, but they run the app *in-process*, with a fake clock, a scripted processor and the background loops driven by hand. Smoke tests answer a different question: **does the real thing work when it's actually running?**
+
+`yarn smoke` starts the **real server** (`src/server.ts`) as its own process. It gets a random port, freshly generated secrets, a temp database, the real payment worker, webhook dispatcher and housekeeping loops, and a simulated processor with real latency (50 ms). Then it calls the **real endpoints over HTTP**, the way a merchant's server, a browser or a webhook receiver would.
+
+| What smoke tests help us do | How |
+|---|---|
+| **Quickly run many scenarios end to end** | About 190 checks across every module run in roughly two minutes with one command, with no manual curl work |
+| **See features working together** | A payment goes through tokenization, async processing, capture, refund and signed webhook delivery, exactly as a client would experience it |
+| **Try to break it** | Every scenario sends hostile input, fires concurrent requests and probes across merchants, then checks that the server is still healthy |
+| **Check what only a running process shows** | Real timers and retries, real network calls to a webhook receiver, the real log output, clean shutdown on `SIGTERM` |
+| **Catch leaks** | After every run, all server logs and the database file are scanned for card numbers, CVCs, secret keys and webhook secrets |
+
+**Why have both:** the automated tests prove each rule precisely and deterministically. Smoke tests prove the assembled service behaves correctly under realistic conditions. A bug in wiring, configuration, timing or logging can pass every unit test and still show up here.
+
+Each check prints `✓` or `✗`. A failed check prints the response that caused it. The command exits with code 1 if any check fails.
+
+### What each scenario covers
+
+Scenarios run in this order. Later ones reuse the merchant created by `merchants`, and `ratelimits` runs last because it deliberately uses up the limits.
+
+#### `foundation`: the HTTP skeleton
+
+| Happy paths | Edge cases and attacks |
+|---|---|
+| `GET /health` returns `200 {status: ok}` | Malformed JSON → `400 invalid_json`, and the card number in it is **not** echoed back |
+| Every response has an `X-Request-Id` | 200 kb body → `413 payload_too_large` |
+| `GET /openapi.json` serves the OpenAPI 3.1 document | 5,000-level nested JSON and an unsupported charset → clean `4xx`, no crash |
+| `GET /docs/` serves Swagger UI | Garbage bytes on a raw socket and a 20 kb header → `400`/`431` or connection closed, no crash |
+| Unknown route or wrong method → JSON `404` (never HTML) | A valid incoming `X-Request-Id` is reused; a malicious one (spaces, injected JSON) is replaced |
+| Every log line is valid single-line JSON with `requestId` and route | Path traversal (`/..%2f..%2fetc%2fpasswd`) → `404`; 200 concurrent requests → all `200`; server still healthy afterwards |
+
+#### `merchants`: sign-up, authentication, key rotation
+
+| Happy paths | Edge cases and attacks |
+|---|---|
+| `POST /merchants` → `201` with merchant and key pair; email stored lowercased | SQL-injection, `<script>` and emoji names are stored and returned **verbatim** (no interpretation) |
+| `GET /merchants/me` works with the new secret key | Whitespace-only or 10,000-char name, header-injection email, wrong types, `__proto__` / `constructor` pollution, typo'd fields → all `400` |
+| `GET /api-keys` shows the full `pk` and only the last 4 characters of the `sk` | Duplicate email in different case → `409`; 8 simultaneous sign-ups with one email → exactly one `201` |
+| Rotating the secret key → the new key works, the old key gets `401` immediately | 8 bad-key variants (missing, `Basic`, one char changed, made-up, `pk` relabelled as `sk`, 8 kb garbage, two keys) → all `401` with **identical** bodies |
+| Rotating the publishable key leaves the secret key working | Lowercase `bearer` accepted; `pk` on a secret route → `403`; rotating with a `pk` → `403`; invalid rotation type → `400` |
+| Key list shows exactly one active key per type, and keeps revoked ones | 10 concurrent rotations → exactly **one** usable key remains; 401s are logged at `warn` |
+
+#### `cards`: tokens and saved cards
+
+| Happy paths | Edge cases and attacks |
+|---|---|
+| `POST /tokens` with the publishable key → `201 tok_…` with brand/last 4, never the number or CVC | Luhn failure, full-width Unicode digits, a 90 kb number, number as an integer, expired card, month 13, fractional month, negative year, bad CVC, extra `cvv` field, card as null/string/array → all `400`, number never echoed |
+| `POST /cards` from a token → `201 card_…` | 10 parallel saves with one token → exactly one `201`, nine `400` (single use) |
+| `GET /cards/:id` and `GET /cards?customerId=` return the saved card | Another merchant's token → same `400` as an unknown token; another merchant can't GET, DELETE or list my card (`404`) |
+| Same card saved twice for one customer → `200` with the **same** card | Publishable key can't save cards (`403`); no key → `401` |
+| `DELETE` → `204`, then `404` | 6 parallel requests with one `Idempotency-Key` → one real creation; a retry is replayed; the same key with a different body → `422`; exactly one card exists afterwards |
+
+#### `payments`: asynchronous processing
+
+| Happy paths | Edge cases and attacks |
+|---|---|
+| Token payment → `202 pending` → automatically `captured`; history = created, authorized, captured | Cancel or refund while `pending` → `409`; refund before capture → `409`; capture more than authorized → `400` |
+| Worker log carries the same `requestId` as the request that created the payment | Capture and cancel fired at the same time → exactly one accepted |
+| Manual capture: `authorized` → partial capture 2000/2500 → refund 500 → refund the rest → `refunded` (capped at the **captured** amount) | 10 simultaneous full refunds → exactly one accepted, never over-refunded; refunding a fully refunded payment → `409`; capturing a failed payment → `409` |
+| Cancel an authorized payment → `cancelled` | Negative, fractional, string, oversized or null amounts; unknown currency; no card source; two sources; a used token; `saveCard` with `cardId`; 21 metadata keys; nested metadata; typo'd fields → all `400` |
+| Test cards: declined, insufficient funds, expired, incorrect CVC → `failed` with the right code | Unknown `cardId` → `404`; `pk` can't create payments → `403`; PATCH of `status`/`amount` → `400` naming both |
+| PATCH merges metadata (`null` deletes a key) | Same `Idempotency-Key` → the same payment is replayed; same key with a different amount → `422`; only one payment exists |
+| `saveCard` + approval → card saved and listed | Another merchant can't get, patch or refund my payment (`404`), and my payment is untouched |
+| | `saveCard` + decline → card **not** saved; deleting a card a pending payment needs → `409` |
+| | The `processing_error` card is retried (logged at `warn`) and finally fails (logged at `error`) after ~30 s |
+
+#### `webhooks`: signed delivery and SSRF protection
+
+| Happy paths | Edge cases and attacks |
+|---|---|
+| `POST /webhooks` → `201` with a `whsec_` secret shown once; `GET` never shows it | Receiver returns `500` → delivery stays pending, `lastError` "HTTP 500", next retry ~1 minute later, logged at `warn` |
+| A real local receiver gets `payment.created`, `payment.authorized` and `payment.captured` | Receiver that never answers → `"timeout"` after ~10 s |
+| Every delivery verifies with an **independently written** HMAC check; `Webhook-Id`/`Webhook-Event` headers match the event | A tampered body fails verification; deleting an endpoint removes its delivery log |
+| `data.object` is the payment as it was at that moment | Unknown event type, `"*"` mixed with types, empty list, `javascript:`/`file:` URLs, credentials in the URL, a 3 kb URL → all `400` |
+| `GET /events?type=payment.captured` includes the payment | 11th endpoint → `409`; another merchant can't read, change or rotate my endpoint, or see my events |
+| `rotate-secret` → new deliveries verify with the new secret and **fail** with the old one | **A second server in secure mode** rejects private targets using real DNS: `http://`, `localhost`, `127.0.0.1`, `10.x`, `192.168.x`, cloud metadata `169.254.169.254`, `[::1]`, `[::ffff:127.0.0.1]`, `2130706433`, `0x7f.1`, `0.0.0.0` |
+
+#### `ratelimits`: limits under flood (runs last)
+
+| Happy paths | Edge cases and attacks |
+|---|---|
+| Existing merchants keep working after the sign-up limit is hit | Sign-up flood → `429 rate_limited` with a sensible `Retry-After`, logged at `warn` |
+| | Flooding one secret key → `429` once its per-key budget runs out |
+| | Flooding `POST /tokens` with one publishable key → `429` (card-testing protection) |
+
+#### Always: shutdown and leak scan
+
+After the scenarios, every run checks:
+- no card number, CVC, secret key or webhook secret appears in the **server logs** or the **database file**;
+- the server exits with code `0` on `SIGTERM`.
+
+### How to run them
+
+```bash
+yarn install
+cp .env.example .env && yarn gen:secrets   # paste the 3 lines into .env
+yarn test                                   # all automated tests
+yarn smoke                                  # real server, every scenario (about 2 min)
+PROCESSOR_FAILURE_RATE=0.3 yarn smoke       # chaos mode
+yarn bench:db                               # capacity measurements
+yarn dev                                    # then open http://localhost:3000/docs
+```
+
+The smoke tests generate their own secrets, port and temp database, so they don't need `.env` and never touch `data/db.json`.
+
+| Variation | Command |
+|---|---|
+| One or more scenarios | `yarn smoke payments` or `yarn smoke cards webhooks`. Prerequisites (`merchants`, plus `cards` for `payments`) are added automatically |
+| Chaos mode | `PROCESSOR_FAILURE_RATE=0.3 yarn smoke`: 30% of processor calls fail at random. The server must never crash or leak; a few final-state checks may legitimately miss if a payment runs out of retries |
+
+**Rate limits during smoke runs:** the smoke server raises the limits (40 sign-ups/hour, 120 tokens/minute, 600 requests/minute) so scenarios have room to work. `ratelimits` then exhausts them on purpose.
+
+## 9.9 What isn't tested, and why
 
 | Not tested | Why | What covers the risk instead |
 |---|---|---|
