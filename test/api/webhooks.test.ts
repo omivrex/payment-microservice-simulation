@@ -27,7 +27,7 @@ afterEach(async () => {
 let hookPath = 0;
 const register = (body: Record<string, unknown>, key = m.sk) =>
   app.api('POST', '/webhooks', { key, body: { url: receiver.url(`/hook-${++hookPath}`), events: ['*'], ...body } });
-const pay = (body: Record<string, unknown> = {}) => app.api('POST', '/payments', { key: m.sk, body: { amount: 1000, currency: 'usd', card: card(), ...body } });
+const pay = (body: Record<string, unknown> = {}) => app.api('POST', '/payments', { key: m.sk, body: { amountMinor: 1000, currency: 'usd', card: card(), ...body } });
 const deliveries = (endpointId: string) => app.ctx.db.read(m.id, (d) => Object.values(d.webhookDeliveries).filter((x) => x.endpointId === endpointId));
 const nowSeconds = () => Math.floor(app.clock.now().getTime() / 1000);
 
@@ -392,7 +392,7 @@ describe('§6.8 guarantees', () => {
     try {
       const mm = await createMerchant(slowApp);
       await slowApp.api('POST', '/webhooks', { key: mm.sk, body: { url: receiver.url(), events: ['payment.created'] } });
-      await slowApp.api('POST', '/payments', { key: mm.sk, body: { amount: 1, currency: 'usd', card: card() } });
+      await slowApp.api('POST', '/payments', { key: mm.sk, body: { amountMinor: 1, currency: 'usd', card: card() } });
       await slowApp.dispatcher.tickOnce(); // attempt 1 claimed, receiver holds it
       await new Promise((r) => setTimeout(r, 50));
       slowApp.clock.advance(31 * SECOND);
@@ -432,7 +432,7 @@ describe('§4.13 SSRF at registration and delivery (fake DNS, secure mode)', () 
       const created = await secureApp.api('POST', '/webhooks', { key: mm.sk, body: { url: 'https://hooks.rebind.test/x', events: ['*'] } });
       assert.equal(created.status, 201);
       target = '127.0.0.1';
-      await secureApp.api('POST', '/payments', { key: mm.sk, body: { amount: 1, currency: 'usd', card: card() } });
+      await secureApp.api('POST', '/payments', { key: mm.sk, body: { amountMinor: 1, currency: 'usd', card: card() } });
       await secureApp.runDispatcher();
       const x = secureApp.ctx.db.read(mm.id, (d) => Object.values(d.webhookDeliveries)[0]!);
       assert.match(x.lastError!, /^blocked:/);

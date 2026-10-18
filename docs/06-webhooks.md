@@ -33,7 +33,7 @@ Webhook-Signature: t=1760520600,v1=5257a869e7ecebeda32affa62cdca3fa51cad7e77a0e5
   "id": "evt_44c2…",
   "type": "payment.captured",
   "createdAt": "2026-10-15T09:30:00.000Z",
-  "data": { "object": { "id": "pay_3f9c…", "status": "captured", "amount": 2500, "…": "…" } }
+  "data": { "object": { "id": "pay_3f9c…", "status": "captured", "amountMinor": 2500, "…": "…" } }
 }
 ```
 

@@ -122,7 +122,7 @@ Every error response has the same shape, and **always** includes the request ID:
     "message": "Invalid request",
     "details": [
       { "field": "card.number", "message": "must be a valid card number" },
-      { "field": "amount", "message": "must be a positive integer in minor units" }
+      { "field": "amountMinor", "message": "must be a positive integer in minor units" }
     ],
     "requestId": "req_1b7f0c9e2d4a4f3b8c6d5e7f9a0b1c2d"
   }
@@ -187,7 +187,7 @@ logger.fatal('uncaught exception', { err });
 Each entry is **one line of JSON**:
 
 ```json
-{"time":"2026-10-17T09:30:00.123Z","level":"error","msg":"request failed","requestId":"req_1b7f…","method":"POST","route":"/payments/:id/refund","status":500,"durationMs":12,"merchantId":"mer_7c1e…","keyId":"key_a81b…","err":{"name":"TypeError","message":"Cannot read properties of undefined (reading 'amountCaptured')","stack":"TypeError: Cannot read …\n    at refund (src/modules/payments/service.ts:142:31)\n    …"}}
+{"time":"2026-10-17T09:30:00.123Z","level":"error","msg":"request failed","requestId":"req_1b7f…","method":"POST","route":"/payments/:id/refund","status":500,"durationMs":12,"merchantId":"mer_7c1e…","keyId":"key_a81b…","err":{"name":"TypeError","message":"Cannot read properties of undefined (reading 'amountCapturedMinor')","stack":"TypeError: Cannot read …\n    at refund (src/modules/payments/service.ts:142:31)\n    …"}}
 ```
 
 | Decision | Why |

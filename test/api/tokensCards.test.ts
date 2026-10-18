@@ -76,7 +76,7 @@ describe('§5.6 POST /tokens', () => {
 
   it('missing card / extra top-level field → 400', async () => {
     assert.equal((await app.api('POST', '/tokens', { key: m.pk, body: {} })).status, 400);
-    assert.equal((await app.api('POST', '/tokens', { key: m.pk, body: { card: card(), amount: 5 } })).status, 400);
+    assert.equal((await app.api('POST', '/tokens', { key: m.pk, body: { card: card(), amountMinor: 5 } })).status, 400);
   });
 
   it('no key → 401', async () => {

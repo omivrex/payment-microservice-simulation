@@ -27,7 +27,7 @@ beforeEach(async () => {
 afterEach(() => app.close());
 
 const pay = async (body: Record<string, unknown> = {}) => {
-  const res = await app.api('POST', '/payments', { key: m.sk, body: { amount: 1000, currency: 'usd', card: card(), ...body } });
+  const res = await app.api('POST', '/payments', { key: m.sk, body: { amountMinor: 1000, currency: 'usd', card: card(), ...body } });
   assert.equal(res.status, 202, res.text);
   return res.body.id as string;
 };
@@ -96,7 +96,7 @@ describe('§3.6 reverting failed actions', () => {
     const p = payment(id);
     assert.equal(p.status, 'authorized');
     assert.equal(p.pendingAction, null);
-    assert.equal(p.amountCaptured, 0);
+    assert.equal(p.amountCapturedMinor, 0);
     assert.equal(p.history.at(-1)?.type, 'capture_failed');
     const evt = app.ctx.db.read(m.id, (d) => Object.values(d.events).find((e) => e.type === 'payment.action_failed')!);
     assert.deepEqual(evt.data.action, { type: 'capture', code: 'gateway_timeout', message: 'temporarily unavailable' });
@@ -107,17 +107,17 @@ describe('§3.6 reverting failed actions', () => {
   it('refund fails permanently from partially_refunded → back to partially_refunded precisely', async () => {
     const id = await pay();
     await app.settle();
-    await app.api('POST', `/payments/${id}/refund`, { key: m.sk, body: { amount: 300 } });
+    await app.api('POST', `/payments/${id}/refund`, { key: m.sk, body: { amountMinor: 300 } });
     await app.settle();
     assert.equal(payment(id).status, 'partially_refunded');
     proc.script('refund', ...Array.from({ length: 5 }, () => transient()));
-    await app.api('POST', `/payments/${id}/refund`, { key: m.sk, body: { amount: 200 } });
+    await app.api('POST', `/payments/${id}/refund`, { key: m.sk, body: { amountMinor: 200 } });
     for (let i = 0; i < 5; i++) {
       await app.runWorker();
       app.clock.advance(20 * SECOND);
     }
     assert.equal(payment(id).status, 'partially_refunded');
-    assert.equal(payment(id).amountRefunded, 300, 'failed refund not counted');
+    assert.equal(payment(id).amountRefundedMinor, 300, 'failed refund not counted');
   });
 
   it('cancel fails permanently → back to authorized', async () => {
@@ -253,7 +253,7 @@ describe('§3.6 recovery across restarts', () => {
     const merchantId = 'mer_restart';
     const created = await first.services.payments.create(
       merchantId,
-      { amount: 500, currency: 'USD', source: { card: { number: '4242424242424242', expMonth: 12, expYear: 2030, cvc: '123' } }, saveCard: false, customerId: null, captureMethod: 'manual', description: null, metadata: {} },
+      { amountMinor: 500, currency: 'USD', source: { card: { number: '4242424242424242', expMonth: 12, expYear: 2030, cvc: '123' } }, saveCard: false, customerId: null, captureMethod: 'manual', description: null, metadata: {} },
       null,
     );
     await first.ctx.db.close(); // "crash" before any worker ran

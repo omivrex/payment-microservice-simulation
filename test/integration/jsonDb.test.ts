@@ -336,3 +336,47 @@ describe('§7.12 size warning', () => {
     await again.close();
   });
 });
+
+describe('§7.8 schema migration v1 → v2 (amount fields renamed to *Minor)', () => {
+  it('renames payment, job, event-snapshot and idempotency-replay fields; leaves metadata and error bodies alone; persists v2', async () => {
+    const v1Payment = {
+      id: 'pay_1', status: 'partially_refunded', amount: 2500, currency: 'USD', captureMethod: 'manual',
+      amountCaptured: 2000, amountRefunded: 500, metadata: { amount: 'merchant-owned key' },
+      pendingAction: { type: 'refund', amount: 500, jobId: 'job_1', previousStatus: 'captured', requestedAt: 't' },
+      history: [{ type: 'created', at: 't' }, { type: 'captured', at: 't', amount: 2000 }],
+    };
+    const v1 = {
+      meta: { schemaVersion: 1 },
+      central: { merchants: {}, apiKeys: {} },
+      merchants: {
+        m1: {
+          tokens: {}, cards: {}, webhookEndpoints: {}, webhookDeliveries: {},
+          payments: { pay_1: v1Payment },
+          jobs: { job_1: { id: 'job_1', type: 'refund', amount: 500 } },
+          events: { evt_1: { id: 'evt_1', type: 'payment.created', data: { object: structuredClone(v1Payment) }, createdAt: 't' } },
+          idempotency: {
+            ok: { id: 'ok', status: 'completed', responseStatus: 202, responseBody: structuredClone(v1Payment) },
+            err: { id: 'err', status: 'completed', responseStatus: 400, responseBody: { error: { code: 'validation_error', details: [{ field: 'amount', message: 'x' }] } } },
+          },
+        },
+      },
+    };
+    await writeFile(file, JSON.stringify(v1));
+    const db = await open();
+    const d = db.read('m1', (x) => x) as any;
+    const p = d.payments.pay_1;
+    assert.deepEqual([p.amountMinor, p.amountCapturedMinor, p.amountRefundedMinor], [2500, 2000, 500]);
+    assert.ok(!('amount' in p) && !('amountCaptured' in p) && !('amountRefunded' in p));
+    assert.equal(p.pendingAction.amountMinor, 500);
+    assert.equal(p.history[1].amountMinor, 2000);
+    assert.deepEqual(p.metadata, { amount: 'merchant-owned key' }, 'merchant metadata untouched');
+    assert.equal(d.jobs.job_1.amountMinor, 500);
+    assert.equal(d.events.evt_1.data.object.amountMinor, 2500);
+    assert.equal(d.idempotency.ok.responseBody.amountCapturedMinor, 2000);
+    assert.equal(d.idempotency.err.responseBody.error.details[0].field, 'amount', 'error bodies untouched');
+    await db.close();
+    const onDisk = JSON.parse(await readFile(file, 'utf8'));
+    assert.equal(onDisk.meta.schemaVersion, 2, 'migrated file persisted immediately');
+    assert.equal(onDisk.merchants.m1.payments.pay_1.amountMinor, 2500);
+  });
+});

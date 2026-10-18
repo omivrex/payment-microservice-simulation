@@ -4,18 +4,18 @@ import type { Payment } from '../../db/schema.js';
 export interface PaymentView {
   id: string;
   status: Payment['status'];
-  amount: number;
+  amountMinor: number;
   currency: string;
   captureMethod: Payment['captureMethod'];
-  amountCaptured: number;
-  amountRefunded: number;
+  amountCapturedMinor: number;
+  amountRefundedMinor: number;
   customerId: string | null;
   description: string | null;
   metadata: Record<string, string>;
   paymentMethod: Payment['paymentMethod'];
   authorizationCode: string | null;
   failure: Payment['failure'];
-  pendingAction: { type: NonNullable<Payment['pendingAction']>['type']; amount: number | null; requestedAt: string } | null;
+  pendingAction: { type: NonNullable<Payment['pendingAction']>['type']; amountMinor: number | null; requestedAt: string } | null;
   history: Payment['history'];
   createdAt: string;
   updatedAt: string;
@@ -25,11 +25,11 @@ export function toPaymentView(p: Payment): PaymentView {
   return {
     id: p.id,
     status: p.status,
-    amount: p.amount,
+    amountMinor: p.amountMinor,
     currency: p.currency,
     captureMethod: p.captureMethod,
-    amountCaptured: p.amountCaptured,
-    amountRefunded: p.amountRefunded,
+    amountCapturedMinor: p.amountCapturedMinor,
+    amountRefundedMinor: p.amountRefundedMinor,
     customerId: p.customerId,
     description: p.description,
     metadata: { ...p.metadata },
@@ -37,7 +37,7 @@ export function toPaymentView(p: Payment): PaymentView {
     authorizationCode: p.authorizationCode,
     failure: p.failure ? { ...p.failure } : null,
     pendingAction: p.pendingAction
-      ? { type: p.pendingAction.type, amount: p.pendingAction.amount, requestedAt: p.pendingAction.requestedAt }
+      ? { type: p.pendingAction.type, amountMinor: p.pendingAction.amountMinor, requestedAt: p.pendingAction.requestedAt }
       : null,
     history: p.history.map((h) => ({ ...h })),
     createdAt: p.createdAt,

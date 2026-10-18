@@ -35,7 +35,7 @@ describe('§2.7 retention', () => {
   it('expired token whose card a PENDING payment still needs → card kept', async () => {
     const tok = await tokenize();
     const cardId = data().tokens[tok]!.cardId;
-    const p = await app.api('POST', '/payments', { key: m.sk, body: { amount: 100, currency: 'usd', token: tok } });
+    const p = await app.api('POST', '/payments', { key: m.sk, body: { amountMinor: 100, currency: 'usd', token: tok } });
     assert.equal(p.status, 202);
     app.clock.advance(20 * MINUTE); // token expired, worker hasn't run
     await hk.tickOnce();
@@ -46,7 +46,7 @@ describe('§2.7 retention', () => {
   });
 
   it('pending raw-card payment keeps its card', async () => {
-    const p = await app.api('POST', '/payments', { key: m.sk, body: { amount: 100, currency: 'usd', card: card() } });
+    const p = await app.api('POST', '/payments', { key: m.sk, body: { amountMinor: 100, currency: 'usd', card: card() } });
     app.clock.advance(30 * DAY);
     await hk.tickOnce();
     assert.ok(data().cards[data().payments[p.body.id]!.sourceCardId]);
@@ -60,9 +60,9 @@ describe('§2.7 retention', () => {
   });
 
   it('finished jobs older than RETENTION_DAYS are deleted; queued/running jobs of any age are kept', async () => {
-    const done = await app.api('POST', '/payments', { key: m.sk, body: { amount: 100, currency: 'usd', card: card() } });
+    const done = await app.api('POST', '/payments', { key: m.sk, body: { amountMinor: 100, currency: 'usd', card: card() } });
     await app.settle();
-    const queued = await app.api('POST', '/payments', { key: m.sk, body: { amount: 100, currency: 'usd', card: card() } });
+    const queued = await app.api('POST', '/payments', { key: m.sk, body: { amountMinor: 100, currency: 'usd', card: card() } });
     app.clock.advance(7 * DAY + HOUR);
     await hk.tickOnce();
     const jobs = Object.values(data().jobs);
@@ -72,7 +72,7 @@ describe('§2.7 retention', () => {
   });
 
   it('jobs completed within the retention window are kept', async () => {
-    await app.api('POST', '/payments', { key: m.sk, body: { amount: 100, currency: 'usd', card: card() } });
+    await app.api('POST', '/payments', { key: m.sk, body: { amountMinor: 100, currency: 'usd', card: card() } });
     await app.settle();
     app.clock.advance(6 * DAY);
     await hk.tickOnce();
@@ -85,7 +85,7 @@ describe('§2.7 retention', () => {
     try {
       await app.api('POST', '/webhooks', { key: m.sk, body: { url: ok.url(), events: ['payment.created'] } });
       const bad = await app.api('POST', '/webhooks', { key: m.sk, body: { url: failing.url(), events: ['payment.created'] } });
-      await app.api('POST', '/payments', { key: m.sk, body: { amount: 100, currency: 'usd', card: card() } });
+      await app.api('POST', '/payments', { key: m.sk, body: { amountMinor: 100, currency: 'usd', card: card() } });
       await app.runDispatcher();
       app.clock.advance(8 * DAY);
       await hk.tickOnce();

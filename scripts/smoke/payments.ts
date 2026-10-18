@@ -5,7 +5,7 @@ const card = (number = '4242424242424242', extra: Record<string, unknown> = {}) 
 export async function payments(s: SmokeContext): Promise<void> {
   const { sk, pk } = s.state.merchant as { sk: string; pk: string };
   const create = (body: Record<string, unknown>, headers?: Record<string, string>) =>
-    s.call('POST', '/payments', { key: sk, body: { amount: 2500, currency: 'usd', ...body }, ...(headers ? { headers } : {}) });
+    s.call('POST', '/payments', { key: sk, body: { amountMinor: 2500, currency: 'usd', ...body }, ...(headers ? { headers } : {}) });
   const get = (id: string) => s.call('GET', `/payments/${id}`, { key: sk });
   const act = (id: string, kind: string, body?: unknown) => s.call('POST', `/payments/${id}/${kind}`, { key: sk, ...(body ? { body } : {}) });
   const waitFor = (label: string, id: string, statuses: string[], timeoutMs = 10_000) =>
@@ -22,24 +22,24 @@ export async function payments(s: SmokeContext): Promise<void> {
   const auto = await create({ token: tok.body.id, description: 'Smoke order', metadata: { orderId: 'A1' }, customerId: 'cus_pay' });
   s.check('POST /payments with token → 202 pending', auto.status === 202 && auto.body.status === 'pending', auto.body);
   const autoDone = await waitFor('automatic capture to finish', auto.body.id, ['captured']);
-  s.check('automatic capture: → captured with amountCaptured = amount', autoDone?.amountCaptured === 2500);
+  s.check('automatic capture: → captured with amountCapturedMinor = amount', autoDone?.amountCapturedMinor === 2500);
   s.check('history = created, authorized, captured', JSON.stringify(autoDone?.history.map((h: any) => h.type)) === '["created","authorized","captured"]');
   s.check('worker log correlates with the creating request (same requestId)', await s.logMatches(new RegExp(`"msg":"job processed"[^\\n]*"requestId":"${auto.headers.get('x-request-id')}"`)));
 
   const manual = await create({ card: card('5555555555554444'), captureMethod: 'manual' });
   const authorized = await waitFor('manual payment to be authorized', manual.body.id, ['authorized']);
   s.check('manual capture: → authorized with an authorization code', /^[0-9A-F]{6}$/.test(authorized?.authorizationCode ?? ''));
-  const cap = await act(manual.body.id, 'capture', { amount: 2000 });
+  const cap = await act(manual.body.id, 'capture', { amountMinor: 2000 });
   s.check('partial capture 2000/2500 → 202 capturing', cap.status === 202 && cap.body.status === 'capturing');
   await waitFor('capture', manual.body.id, ['captured']);
-  const r1 = await act(manual.body.id, 'refund', { amount: 500 });
+  const r1 = await act(manual.body.id, 'refund', { amountMinor: 500 });
   s.check('refund 500 → 202 refunding', r1.status === 202 && r1.body.status === 'refunding');
   const partially = await waitFor('partial refund', manual.body.id, ['partially_refunded']);
-  s.check('→ partially_refunded, amountRefunded 500', partially?.amountRefunded === 500);
+  s.check('→ partially_refunded, amountRefundedMinor 500', partially?.amountRefundedMinor === 500);
   const r2 = await act(manual.body.id, 'refund');
-  s.check('refund the rest (no amount) → refunds remaining 1500', r2.body?.pendingAction?.amount === 1500);
+  s.check('refund the rest (no amount) → refunds remaining 1500', r2.body?.pendingAction?.amountMinor === 1500);
   const refunded = await waitFor('full refund', manual.body.id, ['refunded']);
-  s.check('→ refunded; amountRefunded equals amountCaptured (2000), not amount', refunded?.amountRefunded === 2000);
+  s.check('→ refunded; amountRefundedMinor equals amountCapturedMinor (2000), not amount', refunded?.amountRefundedMinor === 2000);
 
   const toCancel = await create({ card: card(), captureMethod: 'manual' });
   await waitFor('authorization before cancel', toCancel.body.id, ['authorized']);
@@ -65,7 +65,7 @@ export async function payments(s: SmokeContext): Promise<void> {
   s.check('refund while pending → 409', (await act(pending.body.id, 'refund')).status === 409);
   await waitFor('authorization', pending.body.id, ['authorized']);
   s.check('refund before capture → 409', (await act(pending.body.id, 'refund')).status === 409);
-  s.check('capture more than authorized → 400', (await act(pending.body.id, 'capture', { amount: 2501 })).status === 400);
+  s.check('capture more than authorized → 400', (await act(pending.body.id, 'capture', { amountMinor: 2501 })).status === 400);
   const race = await Promise.all([act(pending.body.id, 'capture'), act(pending.body.id, 'cancel'), act(pending.body.id, 'capture'), act(pending.body.id, 'cancel')]);
   s.check('capture and cancel fired together → exactly one accepted', race.filter((r) => r.status === 202).length === 1 && race.filter((r) => r.status === 409).length === 3, race.map((r) => r.status));
   await waitFor('race winner to finish', pending.body.id, ['captured', 'cancelled']);
@@ -75,19 +75,19 @@ export async function payments(s: SmokeContext): Promise<void> {
   const refunds = await Promise.all(Array.from({ length: 10 }, () => act(refundRace.body.id, 'refund')));
   s.check('10 simultaneous full refunds → exactly one 202', refunds.filter((r) => r.status === 202).length === 1, refunds.map((r) => r.status));
   const afterRace = await waitFor('race refund', refundRace.body.id, ['refunded']);
-  s.check('never over-refunded (amountRefunded ≤ amountCaptured)', !!afterRace && afterRace.amountRefunded <= afterRace.amountCaptured);
-  s.check('refund after fully refunded → 409', (await act(refundRace.body.id, 'refund', { amount: 1 })).status === 409);
+  s.check('never over-refunded (amountRefundedMinor ≤ amountCapturedMinor)', !!afterRace && afterRace.amountRefundedMinor <= afterRace.amountCapturedMinor);
+  s.check('refund after fully refunded → 409', (await act(refundRace.body.id, 'refund', { amountMinor: 1 })).status === 409);
 
   const failed = declinedIds[0]!.body.id;
   s.check('capture a failed payment → 409', (await act(failed, 'capture')).status === 409);
 
   s.section('Payments: hostile input');
   const bad: Array<[string, Record<string, unknown>]> = [
-    ['negative amount', { amount: -100, card: card() }],
-    ['float amount', { amount: 10.99, card: card() }],
-    ['amount as string', { amount: '2500', card: card() }],
-    ['amount 1e9', { amount: 1e9, card: card() }],
-    ['amount NaN-ish (null)', { amount: null, card: card() }],
+    ['negative amount', { amountMinor: -100, card: card() }],
+    ['float amount', { amountMinor: 10.99, card: card() }],
+    ['amount as string', { amountMinor: '2500', card: card() }],
+    ['amount 1e9', { amountMinor: 1e9, card: card() }],
+    ['amount NaN-ish (null)', { amountMinor: null, card: card() }],
     ['unknown currency', { currency: 'BTC', card: card() }],
     ['no card source', {}],
     ['token + card together', { token: tok.body.id, card: card() }],
@@ -98,12 +98,14 @@ export async function payments(s: SmokeContext): Promise<void> {
     ['typo field "ammount"', { ammount: 5, card: card() }],
   ];
   for (const [label, body] of bad) {
-    const res = await s.call('POST', '/payments', { key: sk, body: { amount: 2500, currency: 'usd', ...body } });
+    const res = await s.call('POST', '/payments', { key: sk, body: { amountMinor: 2500, currency: 'usd', ...body } });
     s.check(`${label} → 400`, res.status === 400, { status: res.status, details: res.body?.error?.details });
   }
+  const oldName = await s.call('POST', '/payments', { key: sk, body: { amount: 2500, currency: 'usd', card: card() } });
+  s.check('old field name "amount" → 400 saying it was renamed to amountMinor', oldName.status === 400 && /renamed to amountMinor/.test(JSON.stringify(oldName.body)));
   s.check('unknown cardId → 404', (await create({ cardId: 'card_00000000000000000000000000000000' })).status === 404);
-  s.check('publishable key cannot create payments → 403', (await s.call('POST', '/payments', { key: pk, body: { amount: 1, currency: 'usd', card: card() } })).status === 403);
-  const patchStatus = await s.call('PATCH', `/payments/${auto.body.id}`, { key: sk, body: { status: 'refunded', amount: 1 } });
+  s.check('publishable key cannot create payments → 403', (await s.call('POST', '/payments', { key: pk, body: { amountMinor: 1, currency: 'usd', card: card() } })).status === 403);
+  const patchStatus = await s.call('PATCH', `/payments/${auto.body.id}`, { key: sk, body: { status: 'refunded', amountMinor: 1 } });
   s.check('PATCH status/amount → 400 naming both fields', patchStatus.status === 400 && patchStatus.body.error.details.length === 2);
   const patchOk = await s.call('PATCH', `/payments/${auto.body.id}`, { key: sk, body: { metadata: { orderId: null, note: 'gift' } } });
   s.check('PATCH metadata merge (null deletes)', patchOk.status === 200 && JSON.stringify(patchOk.body.metadata) === '{"note":"gift"}');
@@ -113,7 +115,7 @@ export async function payments(s: SmokeContext): Promise<void> {
   const first = await create({ card: card(), customerId: 'cus_idem_pay' }, idemHeaders);
   const again = await create({ card: card(), customerId: 'cus_idem_pay' }, idemHeaders);
   s.check('retried create with same Idempotency-Key → same payment, replayed', again.body?.id === first.body?.id && again.headers.get('idempotent-replayed') === 'true');
-  const diff = await create({ card: card(), customerId: 'cus_idem_pay', amount: 1 }, idemHeaders);
+  const diff = await create({ card: card(), customerId: 'cus_idem_pay', amountMinor: 1 }, idemHeaders);
   s.check('same key with a different amount → 422', diff.status === 422);
   const list = await s.call('GET', '/payments?customerId=cus_idem_pay', { key: sk });
   s.check('exactly one payment exists for that key', list.body.total === 1);

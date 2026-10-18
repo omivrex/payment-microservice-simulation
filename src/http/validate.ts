@@ -30,13 +30,16 @@ z.config({
   },
 });
 
-function toDetails(error: z.ZodError): ErrorDetail[] {
+/** Per-endpoint messages for renamed fields: sending the old name explains what to use instead. */
+export type RenamedFields = Record<string, string>;
+
+function toDetails(error: z.ZodError, renamed: RenamedFields = {}): ErrorDetail[] {
   const details: ErrorDetail[] = [];
   for (const issue of error.issues) {
     const parent = issue.path.map(String).join('.');
     if (issue.code === 'unrecognized_keys') {
       for (const key of issue.keys) {
-        details.push({ field: parent ? `${parent}.${key}` : key, message: 'is not a recognized field' });
+        details.push({ field: parent ? `${parent}.${key}` : key, message: renamed[key] ?? 'is not a recognized field' });
       }
     } else {
       details.push({ field: parent || 'body', message: issue.message });
@@ -48,23 +51,23 @@ function toDetails(error: z.ZodError): ErrorDetail[] {
 const isPlainObject = (v: unknown): v is Record<string, unknown> =>
   typeof v === 'object' && v !== null && !Array.isArray(v);
 
-export function parseBody<S extends z.ZodType>(schema: S, body: unknown): z.output<S> {
+export function parseBody<S extends z.ZodType>(schema: S, body: unknown, renamed?: RenamedFields): z.output<S> {
   if (!isPlainObject(body)) throw new ValidationError([{ field: 'body', message: 'must be a JSON object' }]);
-  return parseWith(schema, body);
+  return parseWith(schema, body, renamed);
 }
 
 /** Body that may be omitted entirely (treated as {}). */
-export function parseOptionalBody<S extends z.ZodType>(schema: S, body: unknown): z.output<S> {
-  return parseBody(schema, body === undefined || body === null ? {} : body);
+export function parseOptionalBody<S extends z.ZodType>(schema: S, body: unknown, renamed?: RenamedFields): z.output<S> {
+  return parseBody(schema, body === undefined || body === null ? {} : body, renamed);
 }
 
 export function parseQuery<S extends z.ZodType>(schema: S, query: unknown): z.output<S> {
   return parseWith(schema, query ?? {});
 }
 
-function parseWith<S extends z.ZodType>(schema: S, input: unknown): z.output<S> {
+function parseWith<S extends z.ZodType>(schema: S, input: unknown, renamed?: RenamedFields): z.output<S> {
   const result = schema.safeParse(input);
-  if (!result.success) throw new ValidationError(toDetails(result.error));
+  if (!result.success) throw new ValidationError(toDetails(result.error, renamed));
   return result.data;
 }
 

@@ -21,7 +21,7 @@ export const MAX_METADATA_KEYS = 20;
 export type CardSource = { token: string } | { cardId: string } | { card: CardInput };
 
 export interface CreatePaymentInput {
-  amount: number;
+  amountMinor: number;
   currency: string;
   source: CardSource;
   saveCard: boolean;
@@ -38,13 +38,13 @@ export interface ListPaymentsQuery {
   offset: number;
 }
 
-export function newJob(merchantId: string, paymentId: string, type: JobType, amount: number | null, now: string, requestId: string | null): Job {
+export function newJob(merchantId: string, paymentId: string, type: JobType, amountMinor: number | null, now: string, requestId: string | null): Job {
   return {
     id: newId('job'),
     merchantId,
     paymentId,
     type,
-    amount,
+    amountMinor,
     status: 'queued',
     attempts: 0,
     maxAttempts: MAX_JOB_ATTEMPTS,
@@ -87,11 +87,11 @@ export class PaymentsService {
         id: paymentId,
         merchantId,
         status: 'pending',
-        amount: input.amount,
+        amountMinor: input.amountMinor,
         currency: input.currency,
         captureMethod: input.captureMethod,
-        amountCaptured: 0,
-        amountRefunded: 0,
+        amountCapturedMinor: 0,
+        amountRefundedMinor: 0,
         customerId: input.customerId,
         description: input.description,
         metadata: input.metadata,
@@ -107,7 +107,7 @@ export class PaymentsService {
         saveCardOnApproval: input.saveCard && !card.saved,
         authorizationCode: null,
         failure: null,
-        pendingAction: { type: 'authorize', amount: null, jobId: job.id, previousStatus: null, requestedAt: now },
+        pendingAction: { type: 'authorize', amountMinor: null, jobId: job.id, previousStatus: null, requestedAt: now },
         history: [{ type: 'created', at: now }],
         createdAt: now,
         updatedAt: now,
@@ -159,32 +159,32 @@ export class PaymentsService {
     });
   }
 
-  capture(merchantId: string, paymentId: string, amount: number | undefined, requestId: string | null): Promise<PaymentView> {
+  capture(merchantId: string, paymentId: string, amountMinor: number | undefined, requestId: string | null): Promise<PaymentView> {
     return this.#requestAction(merchantId, paymentId, 'capture', requestId, (p) => {
       if (p.status !== 'authorized') return null;
-      const toCapture = amount ?? p.amount;
-      if (toCapture > p.amount) {
-        throw new ValidationError([{ field: 'amount', message: `cannot exceed the authorized amount (${p.amount})` }]);
+      const toCapture = amountMinor ?? p.amountMinor;
+      if (toCapture > p.amountMinor) {
+        throw new ValidationError([{ field: 'amountMinor', message: `cannot exceed the authorized amount (${p.amountMinor} in minor units)` }]);
       }
-      return { amount: toCapture, nextStatus: 'capturing' };
+      return { amountMinor: toCapture, nextStatus: 'capturing' };
     });
   }
 
-  refund(merchantId: string, paymentId: string, amount: number | undefined, requestId: string | null): Promise<PaymentView> {
+  refund(merchantId: string, paymentId: string, amountMinor: number | undefined, requestId: string | null): Promise<PaymentView> {
     return this.#requestAction(merchantId, paymentId, 'refund', requestId, (p) => {
       if (p.status !== 'captured' && p.status !== 'partially_refunded') return null;
-      const refundable = p.amountCaptured - p.amountRefunded;
-      const toRefund = amount ?? refundable;
+      const refundable = p.amountCapturedMinor - p.amountRefundedMinor;
+      const toRefund = amountMinor ?? refundable;
       if (toRefund > refundable) {
-        throw new ValidationError([{ field: 'amount', message: `cannot exceed the refundable amount (${refundable})` }]);
+        throw new ValidationError([{ field: 'amountMinor', message: `cannot exceed the refundable amount (${refundable} in minor units)` }]);
       }
-      return { amount: toRefund, nextStatus: 'refunding' };
+      return { amountMinor: toRefund, nextStatus: 'refunding' };
     });
   }
 
   cancel(merchantId: string, paymentId: string, requestId: string | null): Promise<PaymentView> {
     return this.#requestAction(merchantId, paymentId, 'cancel', requestId, (p) =>
-      p.status === 'authorized' ? { amount: null, nextStatus: 'cancelling' } : null,
+      p.status === 'authorized' ? { amountMinor: null, nextStatus: 'cancelling' } : null,
     );
   }
 
@@ -197,16 +197,16 @@ export class PaymentsService {
     paymentId: string,
     type: Exclude<JobType, 'authorize'>,
     requestId: string | null,
-    plan: (p: Payment) => { amount: number | null; nextStatus: PaymentStatus } | null,
+    plan: (p: Payment) => { amountMinor: number | null; nextStatus: PaymentStatus } | null,
   ): Promise<PaymentView> {
     const now = isoNow(this.clock);
     return this.db.transact(merchantId, (d) => {
       const p = findPayment(d, paymentId);
       const planned = p.pendingAction ? null : plan(p);
       if (!planned) throw new InvalidStateError(`Cannot ${type} a payment with status "${p.status}"`);
-      const job = newJob(merchantId, p.id, type, planned.amount, now, requestId);
+      const job = newJob(merchantId, p.id, type, planned.amountMinor, now, requestId);
       d.jobs[job.id] = job;
-      p.pendingAction = { type, amount: planned.amount, jobId: job.id, previousStatus: p.status, requestedAt: now };
+      p.pendingAction = { type, amountMinor: planned.amountMinor, jobId: job.id, previousStatus: p.status, requestedAt: now };
       p.status = planned.nextStatus;
       p.updatedAt = now;
       return toPaymentView(p);

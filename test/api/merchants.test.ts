@@ -141,7 +141,8 @@ describe('§4.13 authentication', () => {
   it('the database stores no secret key material (only hashes)', async () => {
     const file = await readFile(app.ctx.config.dbFile, 'utf8');
     assert.ok(!file.includes(m.sk));
-    assert.ok(!file.includes(m.sk.split('_').at(-1)!));
+    // The random part sits after 'sk_test_<16 hex>_'; slice by position (base64url can itself contain '_').
+    assert.ok(!file.includes(m.sk.slice('sk_test_'.length + 17)));
   });
 });
 

@@ -52,7 +52,7 @@ export async function webhooks(s: SmokeContext): Promise<void> {
     const fetched = await s.call('GET', `/webhooks/${ep.body.id}`, { key: sk });
     s.check('GET /webhooks/:id never includes the secret', fetched.status === 200 && !fetched.text.includes('whsec_'));
 
-    const pay = await s.call('POST', '/payments', { key: sk, body: { amount: 4200, currency: 'eur', card: { number: '4242424242424242', expMonth: 12, expYear: 2030, cvc: '123' } } });
+    const pay = await s.call('POST', '/payments', { key: sk, body: { amountMinor: 4200, currency: 'eur', card: { number: '4242424242424242', expMonth: 12, expYear: 2030, cvc: '123' } } });
     await s.waitUntil('3 webhook deliveries (created, authorized, captured)', async () => rx.got.filter((r) => r.path === '/all' && JSON.parse(r.body).data.object.id === pay.body.id).length >= 3 || undefined, 15_000);
     const mine = rx.got.filter((r) => JSON.parse(r.body).data.object.id === pay.body.id);
     s.check('events received: payment.created, payment.authorized, payment.captured', JSON.stringify(mine.map((r) => JSON.parse(r.body).type).sort()) === '["payment.authorized","payment.captured","payment.created"]');

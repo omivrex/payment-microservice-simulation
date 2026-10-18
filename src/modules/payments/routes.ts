@@ -24,6 +24,14 @@ export const CURRENCIES = ['USD', 'EUR', 'GBP', 'CAD', 'AUD', 'NGN', 'JPY'] as c
 export const PAYMENT_STATUSES = ['pending', 'authorized', 'capturing', 'captured', 'refunding', 'partially_refunded', 'refunded', 'cancelling', 'cancelled', 'failed'] as const;
 const MAX_AMOUNT = 99_999_999;
 
+/** Old field names on payment requests, answered with what to use instead. */
+const RENAMED = { amount: "has been renamed to amountMinor: an integer in the currency's minor unit (2500 = $25.00)" };
+
+/** Shared wording so every amount field in the API docs says exactly what unit it is in. */
+const MINOR_UNITS =
+  "Integer in the currency's minor (smallest) unit: 2500 USD = $25.00, 1050 EUR = €10.50. " +
+  'JPY has no minor unit, so 2500 JPY = ¥2500. Decimals are rejected.';
+
 const amountSchema = z
   .number({ error: `must be a positive integer in minor units (max ${MAX_AMOUNT})` })
   .int({ error: `must be a positive integer in minor units (max ${MAX_AMOUNT})` })
@@ -42,7 +50,7 @@ const descriptionSchema = z.string().max(500).nullable();
 
 const createSchema = z
   .strictObject({
-    amount: amountSchema,
+    amountMinor: amountSchema,
     currency: z
       .string({ error: `must be one of: ${CURRENCIES.join(', ')}` })
       .transform((v) => v.toUpperCase())
@@ -64,7 +72,7 @@ const createSchema = z
 
 const updateSchema = z.strictObject({ description: descriptionSchema.optional(), metadata: metadataPatchSchema.optional() });
 
-const amountBodySchema = z.strictObject({ amount: amountSchema.optional() });
+const amountBodySchema = z.strictObject({ amountMinor: amountSchema.optional() });
 const emptyBodySchema = z.strictObject({});
 
 const listSchema = z.strictObject({
@@ -77,12 +85,12 @@ export function paymentsRouter({ services, auth, idempotency }: RouteDeps): Rout
   const router = Router();
 
   route(router, 'post', '/payments', ...auth.secret, idempotency, async (req, res) => {
-    const body = parseBody(createSchema, req.body);
+    const body = parseBody(createSchema, req.body, RENAMED);
     const source: CardSource = body.token !== undefined ? { token: body.token } : body.cardId !== undefined ? { cardId: body.cardId } : { card: body.card! };
     const payment = await services.payments.create(
       req.auth!.merchantId,
       {
-        amount: body.amount,
+        amountMinor: body.amountMinor,
         currency: body.currency,
         source,
         saveCard: body.saveCard ?? false,
@@ -114,13 +122,13 @@ export function paymentsRouter({ services, auth, idempotency }: RouteDeps): Rout
   });
 
   route(router, 'post', '/payments/:id/capture', ...auth.secret, idempotency, async (req, res) => {
-    const { amount } = parseOptionalBody(amountBodySchema, req.body);
-    res.status(202).json(await services.payments.capture(req.auth!.merchantId, req.params.id as string, amount, req.requestId));
+    const { amountMinor } = parseOptionalBody(amountBodySchema, req.body, RENAMED);
+    res.status(202).json(await services.payments.capture(req.auth!.merchantId, req.params.id as string, amountMinor, req.requestId));
   });
 
   route(router, 'post', '/payments/:id/refund', ...auth.secret, idempotency, async (req, res) => {
-    const { amount } = parseOptionalBody(amountBodySchema, req.body);
-    res.status(202).json(await services.payments.refund(req.auth!.merchantId, req.params.id as string, amount, req.requestId));
+    const { amountMinor } = parseOptionalBody(amountBodySchema, req.body, RENAMED);
+    res.status(202).json(await services.payments.refund(req.auth!.merchantId, req.params.id as string, amountMinor, req.requestId));
   });
 
   route(router, 'post', '/payments/:id/cancel', ...auth.secret, idempotency, async (req, res) => {
@@ -146,7 +154,7 @@ const actionErrors = {
   '503': commonErrors['503'],
 };
 const amountBody = jsonBody(
-  { type: 'object', additionalProperties: false, properties: { amount: { type: 'integer', minimum: 1, maximum: MAX_AMOUNT } } },
+  { type: 'object', additionalProperties: false, properties: { amountMinor: { type: 'integer', minimum: 1, maximum: MAX_AMOUNT, description: MINOR_UNITS, example: 1000 } } },
   false,
 );
 
@@ -155,15 +163,15 @@ export const paymentsOpenApi: OpenApiModule = {
   schemas: {
     Payment: {
       type: 'object',
-      required: ['id', 'status', 'amount', 'currency', 'captureMethod', 'amountCaptured', 'amountRefunded', 'customerId', 'description', 'metadata', 'paymentMethod', 'authorizationCode', 'failure', 'pendingAction', 'history', 'createdAt', 'updatedAt'],
+      required: ['id', 'status', 'amountMinor', 'currency', 'captureMethod', 'amountCapturedMinor', 'amountRefundedMinor', 'customerId', 'description', 'metadata', 'paymentMethod', 'authorizationCode', 'failure', 'pendingAction', 'history', 'createdAt', 'updatedAt'],
       properties: {
         id: { type: 'string', example: 'pay_3f9c0a1b2c3d4e5f60718293a4b5c6d7' },
         status: { type: 'string', enum: PAYMENT_STATUSES },
-        amount: { type: 'integer', description: 'Minor units (cents)', example: 2500 },
+        amountMinor: { type: 'integer', description: `Authorized/requested amount. ${MINOR_UNITS}`, example: 2500 },
         currency: { type: 'string', enum: CURRENCIES },
         captureMethod: { type: 'string', enum: ['automatic', 'manual'] },
-        amountCaptured: { type: 'integer' },
-        amountRefunded: { type: 'integer' },
+        amountCapturedMinor: { type: 'integer', description: `Amount captured so far. ${MINOR_UNITS}`, example: 2500 },
+        amountRefundedMinor: { type: 'integer', description: `Amount refunded so far. ${MINOR_UNITS}`, example: 0 },
         customerId: { type: ['string', 'null'] },
         description: { type: ['string', 'null'] },
         metadata: { type: 'object', additionalProperties: { type: 'string' } },
@@ -183,11 +191,11 @@ export const paymentsOpenApi: OpenApiModule = {
         pendingAction: {
           type: ['object', 'null'],
           description: 'The action in flight (one at a time)',
-          properties: { type: { type: 'string', enum: ['authorize', 'capture', 'refund', 'cancel'] }, amount: { type: ['integer', 'null'] }, requestedAt: { type: 'string', format: 'date-time' } },
+          properties: { type: { type: 'string', enum: ['authorize', 'capture', 'refund', 'cancel'] }, amountMinor: { type: ['integer', 'null'], description: `Amount of the action in flight, in minor units (null for authorize/cancel)` }, requestedAt: { type: 'string', format: 'date-time' } },
         },
         history: {
           type: 'array',
-          items: { type: 'object', properties: { type: { type: 'string' }, at: { type: 'string', format: 'date-time' }, amount: { type: 'integer' }, code: { type: 'string' } } },
+          items: { type: 'object', properties: { type: { type: 'string' }, at: { type: 'string', format: 'date-time' }, amountMinor: { type: 'integer', description: 'Amount of this step, in minor units' }, code: { type: 'string' } } },
         },
         createdAt: { type: 'string', format: 'date-time' },
         updatedAt: { type: 'string', format: 'date-time' },
@@ -207,9 +215,9 @@ export const paymentsOpenApi: OpenApiModule = {
         requestBody: jsonBody({
           type: 'object',
           additionalProperties: false,
-          required: ['amount', 'currency'],
+          required: ['amountMinor', 'currency'],
           properties: {
-            amount: { type: 'integer', minimum: 1, maximum: MAX_AMOUNT, example: 2500 },
+            amountMinor: { type: 'integer', minimum: 1, maximum: MAX_AMOUNT, description: MINOR_UNITS, example: 2500 },
             currency: { type: 'string', enum: CURRENCIES, description: 'Case-insensitive', example: 'usd' },
             token: { type: 'string' },
             cardId: { type: 'string' },
@@ -254,7 +262,7 @@ export const paymentsOpenApi: OpenApiModule = {
       },
       patch: {
         summary: 'Update description and/or metadata (merged; null deletes a key)',
-        description: 'Allowed in every status. Status and amount can only change through capture/refund/cancel. Emits payment.updated.',
+        description: 'Allowed in every status. Status and amounts can only change through capture/refund/cancel. Emits payment.updated.',
         security: secretKeyAuth,
         parameters: [paymentIdParam],
         requestBody: jsonBody({
@@ -271,7 +279,7 @@ export const paymentsOpenApi: OpenApiModule = {
     '/payments/{id}/capture': {
       post: {
         summary: 'Request capture (status must be "authorized")',
-        description: '`amount` defaults to the full authorized amount; partial capture releases the rest. Returns 202 with status "capturing".',
+        description: '`amountMinor` (minor units) defaults to the full authorized amount; partial capture releases the rest. Returns 202 with status "capturing".',
         security: secretKeyAuth,
         parameters: [paymentIdParam, idempotencyHeader],
         requestBody: amountBody,
@@ -281,7 +289,7 @@ export const paymentsOpenApi: OpenApiModule = {
     '/payments/{id}/refund': {
       post: {
         summary: 'Request a refund (status "captured" or "partially_refunded")',
-        description: '`amount` defaults to everything still refundable (captured − refunded). Returns 202 with status "refunding".',
+        description: '`amountMinor` (minor units) defaults to everything still refundable (captured − refunded). Returns 202 with status "refunding".',
         security: secretKeyAuth,
         parameters: [paymentIdParam, idempotencyHeader],
         requestBody: amountBody,

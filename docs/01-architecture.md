@@ -209,7 +209,7 @@ Every error response has the same shape:
   "error": {
     "code": "validation_error",
     "message": "Invalid request",
-    "details": [{ "field": "amount", "message": "must be a positive integer" }],
+    "details": [{ "field": "amountMinor", "message": "must be a positive integer" }],
     "requestId": "req_1b7f0c9e2d4a4f3b8c6d5e7f9a0b1c2d"
   }
 }

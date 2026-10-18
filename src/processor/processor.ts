@@ -15,10 +15,10 @@ export interface Processor {
     cardNumber: string;
     expMonth: number;
     expYear: number;
-    amount: number;
+    amountMinor: number;
     currency: string;
   }): Promise<ProcessorResult<{ authorizationCode: string }>>;
-  capture(input: { reference: string; authorizationCode: string; amount: number }): Promise<ProcessorResult>;
-  refund(input: { reference: string; authorizationCode: string; amount: number }): Promise<ProcessorResult>;
+  capture(input: { reference: string; authorizationCode: string; amountMinor: number }): Promise<ProcessorResult>;
+  refund(input: { reference: string; authorizationCode: string; amountMinor: number }): Promise<ProcessorResult>;
   cancel(input: { reference: string; authorizationCode: string }): Promise<ProcessorResult>;
 }

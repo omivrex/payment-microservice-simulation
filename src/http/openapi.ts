@@ -120,7 +120,7 @@ export function buildOpenApiDocument(modules: OpenApiModule[]): Record<string, u
         error: {
           code: 'validation_error',
           message: 'Invalid request',
-          details: [{ field: 'amount', message: 'is required' }],
+          details: [{ field: 'amountMinor', message: 'is required' }],
           requestId: 'req_1b7f0c9e2d4a4f3b8c6d5e7f9a0b1c2d',
         },
       },

@@ -4,6 +4,21 @@ Base URL (local): `http://localhost:3000`. All request and response bodies are J
 
 ## 5.1 Conventions
 
+### Amounts
+
+Every money field is an **integer in the currency's minor (smallest) unit**, and its name ends in `Minor` to say so: `amountMinor`, `amountCapturedMinor`, `amountRefundedMinor`, `pendingAction.amountMinor`, `history[].amountMinor`.
+
+| You send / receive | Means |
+|---|---|
+| `"amountMinor": 2500, "currency": "usd"` | $25.00 |
+| `"amountMinor": 1050, "currency": "eur"` | €10.50 |
+| `"amountMinor": 2500, "currency": "jpy"` | ¥2500 (JPY has no minor unit, so its smallest unit is the yen) |
+| `"amountMinor": 10.50` | `400`: decimals are rejected |
+| `"amount": 2500` (the old field name) | `400`: "has been renamed to amountMinor …" |
+
+**Why minor units:** floating-point maths can't represent money exactly (`0.1 + 0.2 !== 0.3`); integers can.
+**Why `Minor` in the name:** a bare `amount: 2500` is ambiguous ($25.00 or $2,500?). The suffix puts the unit in the field name itself, where nobody can miss it.
+
 ### Authentication
 
 ```
@@ -236,11 +251,11 @@ Errors: `409 conflict` if a `pending` payment is still waiting to be authorized 
 {
   "id": "pay_3f9c…",
   "status": "captured",
-  "amount": 2500,
+  "amountMinor": 2500,
   "currency": "USD",
   "captureMethod": "automatic",
-  "amountCaptured": 2500,
-  "amountRefunded": 0,
+  "amountCapturedMinor": 2500,
+  "amountRefundedMinor": 0,
   "customerId": "cus_from_my_system_42",
   "description": "Order #1042",
   "metadata": { "orderId": "1042" },
@@ -250,8 +265,8 @@ Errors: `409 conflict` if a `pending` payment is still waiting to be authorized 
   "pendingAction": null,
   "history": [
     { "type": "created",    "at": "…" },
-    { "type": "authorized", "at": "…", "amount": 2500 },
-    { "type": "captured",   "at": "…", "amount": 2500 }
+    { "type": "authorized", "at": "…", "amountMinor": 2500 },
+    { "type": "captured",   "at": "…", "amountMinor": 2500 }
   ],
   "createdAt": "…",
   "updatedAt": "…"
@@ -264,7 +279,7 @@ Request:
 
 ```json
 {
-  "amount": 2500,
+  "amountMinor": 2500,
   "currency": "usd",
   "token": "tok_51d0…",
   "saveCard": true,
@@ -277,7 +292,7 @@ Request:
 
 | Field | Required | Rules |
 |---|---|---|
-| `amount` | ✓ | Integer, 1 – 99,999,999 (minor units) |
+| `amountMinor` | ✓ | Integer in the currency's minor unit, 1 – 99,999,999 (`2500` USD = $25.00; `2500` JPY = ¥2500). See [Amounts](#amounts) |
 | `currency` | ✓ | One of the supported codes (case-insensitive) |
 | `token` \| `cardId` \| `card` | exactly one | See [Lifecycle §3.3](03-payment-lifecycle.md#33-creating-a-payment) |
 | `saveCard` | – | Boolean, default `false`. Not allowed with `cardId` |
@@ -303,7 +318,7 @@ Request (at least one field):
 ```
 
 - `metadata` is **merged** into the existing metadata. Setting a key to `null` deletes it.
-- Any other field (`amount`, `status`, …) → `400` naming the field.
+- Any other field (`amountMinor`, `status`, …) → `400` naming the field.
 - Emits `payment.updated`. Response `200` with the payment.
 
 **Why merge instead of replace:** two systems can each manage their own metadata keys without overwriting each other's.
@@ -311,19 +326,19 @@ Request (at least one field):
 ### `POST /payments/:id/capture` ⟳
 
 ```json
-{ "amount": 2000 }
+{ "amountMinor": 2000 }
 ```
 
-`amount` is optional and defaults to the full authorized amount. Response **`202`** with `status: "capturing"` and `pendingAction` filled in.
+`amountMinor` is optional and defaults to the full authorized amount. Response **`202`** with `status: "capturing"` and `pendingAction` filled in.
 Errors: `409 invalid_state` unless the payment is `authorized` · `400` amount above the authorized amount.
 
 ### `POST /payments/:id/refund` ⟳
 
 ```json
-{ "amount": 500 }
+{ "amountMinor": 500 }
 ```
 
-`amount` is optional and defaults to the remaining refundable amount. Response **`202`** with `status: "refunding"`.
+`amountMinor` is optional and defaults to the remaining refundable amount. Response **`202`** with `status: "refunding"`.
 Errors: `409 invalid_state` unless the payment is `captured` or `partially_refunded` · `400` amount above the refundable amount.
 
 ### `POST /payments/:id/cancel` ⟳

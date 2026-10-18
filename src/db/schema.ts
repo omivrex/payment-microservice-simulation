@@ -67,7 +67,7 @@ export type JobType = 'authorize' | 'capture' | 'refund' | 'cancel';
 export interface PaymentHistoryEntry {
   type: string;
   at: string;
-  amount?: number;
+  amountMinor?: number;
   code?: string;
 }
 
@@ -75,11 +75,11 @@ export interface Payment {
   id: string;
   merchantId: string;
   status: PaymentStatus;
-  amount: number;
+  amountMinor: number;
   currency: string;
   captureMethod: 'automatic' | 'manual';
-  amountCaptured: number;
-  amountRefunded: number;
+  amountCapturedMinor: number;
+  amountRefundedMinor: number;
   customerId: string | null;
   description: string | null;
   metadata: Record<string, string>;
@@ -97,7 +97,7 @@ export interface Payment {
   failure: { code: string; message: string } | null;
   pendingAction: {
     type: JobType;
-    amount: number | null;
+    amountMinor: number | null;
     jobId: string;
     previousStatus: PaymentStatus | null;
     requestedAt: string;
@@ -112,7 +112,7 @@ export interface Job {
   merchantId: string;
   paymentId: string;
   type: JobType;
-  amount: number | null;
+  amountMinor: number | null;
   status: 'queued' | 'running' | 'succeeded' | 'failed';
   attempts: number;
   maxAttempts: number;
@@ -208,7 +208,8 @@ export interface DatabaseFile {
   merchants: Record<string, MerchantData>;
 }
 
-export const CURRENT_SCHEMA_VERSION = 1;
+/** v2: money fields renamed to state their unit (amount → amountMinor, amountCaptured → amountCapturedMinor, …). */
+export const CURRENT_SCHEMA_VERSION = 2;
 
 export const emptyCentral = (): CentralData => ({ merchants: {}, apiKeys: {} });
 

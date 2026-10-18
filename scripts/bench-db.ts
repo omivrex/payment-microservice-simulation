@@ -23,11 +23,11 @@ function payment(i: number): Payment {
     id,
     merchantId: 'mer_bench',
     status: 'captured',
-    amount: 2500,
+    amountMinor: 2500,
     currency: 'USD',
     captureMethod: 'automatic',
-    amountCaptured: 2500,
-    amountRefunded: 0,
+    amountCapturedMinor: 2500,
+    amountRefundedMinor: 0,
     customerId: `cus_${i % 500}`,
     description: `Order #${i}`,
     metadata: { orderId: String(i), channel: 'web' },
@@ -39,8 +39,8 @@ function payment(i: number): Payment {
     pendingAction: null,
     history: [
       { type: 'created', at: iso },
-      { type: 'authorized', at: iso, amount: 2500 },
-      { type: 'captured', at: iso, amount: 2500 },
+      { type: 'authorized', at: iso, amountMinor: 2500 },
+      { type: 'captured', at: iso, amountMinor: 2500 },
     ],
     createdAt: iso,
     updatedAt: iso,
@@ -60,7 +60,7 @@ for (const n of SIZES) {
     md.payments[p.id] = p;
     for (let j = 0; j < 2; j++) {
       const jobId = `job_${i}_${j}`;
-      md.jobs[jobId] = { id: jobId, merchantId: 'mer_bench', paymentId: p.id, type: j ? 'capture' : 'authorize', amount: 2500, status: 'succeeded', attempts: 1, maxAttempts: 5, runAt: iso, lockedUntil: null, lastError: null, requestId: null, createdAt: iso, updatedAt: iso, completedAt: iso };
+      md.jobs[jobId] = { id: jobId, merchantId: 'mer_bench', paymentId: p.id, type: j ? 'capture' : 'authorize', amountMinor: 2500, status: 'succeeded', attempts: 1, maxAttempts: 5, runAt: iso, lockedUntil: null, lastError: null, requestId: null, createdAt: iso, updatedAt: iso, completedAt: iso };
     }
     for (const type of ['payment.created', 'payment.authorized', 'payment.captured'] as const) {
       const evtId = `evt_${i}_${type}`;

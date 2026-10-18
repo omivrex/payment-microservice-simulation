@@ -13,7 +13,7 @@ before(async () => {
 after(() => app.close());
 
 const pay = (body: Record<string, unknown>, key = m.sk) =>
-  app.api('POST', '/payments', { key, body: { amount: 1000, currency: 'usd', ...body } });
+  app.api('POST', '/payments', { key, body: { amountMinor: 1000, currency: 'usd', ...body } });
 const get = (id: string, key = m.sk) => app.api('GET', `/payments/${id}`, { key });
 const action = (id: string, kind: 'capture' | 'refund' | 'cancel', body?: unknown, key = m.sk) =>
   app.api('POST', `/payments/${id}/${kind}`, { key, ...(body === undefined ? {} : { body }) });
@@ -36,7 +36,7 @@ describe('§5.8 POST /payments', () => {
     assert.equal(res.body.currency, 'USD');
     assert.match(res.body.id, /^pay_[0-9a-f]{32}$/);
     assert.deepEqual(Object.keys(res.body).sort(), [
-      'amount', 'amountCaptured', 'amountRefunded', 'authorizationCode', 'captureMethod', 'createdAt', 'currency', 'customerId',
+      'amountCapturedMinor', 'amountMinor', 'amountRefundedMinor', 'authorizationCode', 'captureMethod', 'createdAt', 'currency', 'customerId',
       'description', 'failure', 'history', 'id', 'metadata', 'paymentMethod', 'pendingAction', 'status', 'updatedAt',
     ]);
     assert.deepEqual(res.body.paymentMethod, { type: 'card', cardId: null, brand: 'visa', last4: '4242', expMonth: 12, expYear: 2030 });
@@ -54,7 +54,7 @@ describe('§5.8 POST /payments', () => {
     await app.runWorker();
     const done = (await get(res.body.id)).body;
     assert.equal(done.status, 'captured');
-    assert.equal(done.amountCaptured, 1000);
+    assert.equal(done.amountCapturedMinor, 1000);
     assert.equal(done.pendingAction, null);
     assert.deepEqual(done.history.map((h: any) => h.type), ['created', 'authorized', 'captured']);
     assert.deepEqual(events(m.id, res.body.id), ['payment.created', 'payment.authorized', 'payment.captured']);
@@ -121,12 +121,12 @@ describe('§5.8 POST /payments', () => {
     ['no card source', { card: undefined }, 'token'],
     ['two sources', { card: card(), token: 'tok_x' }, 'token'],
     ['saveCard with cardId', { cardId: 'card_x', saveCard: true, card: undefined }, 'saveCard'],
-    ['amount 0', { amount: 0, card: card() }, 'amount'],
-    ['amount -1', { amount: -1, card: card() }, 'amount'],
-    ['amount 10.5', { amount: 10.5, card: card() }, 'amount'],
-    ['amount as string', { amount: '1000', card: card() }, 'amount'],
-    ['amount 100,000,000', { amount: 100_000_000, card: card() }, 'amount'],
-    ['amount null', { amount: null, card: card() }, 'amount'],
+    ['amount 0', { amountMinor: 0, card: card() }, 'amountMinor'],
+    ['amount -1', { amountMinor: -1, card: card() }, 'amountMinor'],
+    ['amount 10.5', { amountMinor: 10.5, card: card() }, 'amountMinor'],
+    ['amount as string', { amountMinor: '1000', card: card() }, 'amountMinor'],
+    ['amount 100,000,000', { amountMinor: 100_000_000, card: card() }, 'amountMinor'],
+    ['amount null', { amountMinor: null, card: card() }, 'amountMinor'],
     ['unsupported currency', { currency: 'XYZ', card: card() }, 'currency'],
     ['2-letter currency', { currency: 'US', card: card() }, 'currency'],
     ['numeric currency', { currency: 840, card: card() }, 'currency'],
@@ -147,8 +147,31 @@ describe('§5.8 POST /payments', () => {
     });
   }
 
+  it('the old field name "amount" → 400 explaining it was renamed to amountMinor (create, capture, refund)', async () => {
+    const created = await app.api('POST', '/payments', { key: m.sk, body: { amount: 1000, currency: 'usd', card: card() } });
+    assert.equal(created.status, 400);
+    const hint = created.body.error.details.find((d: any) => d.field === 'amount');
+    assert.match(hint.message, /renamed to amountMinor.*minor unit \(2500 = \$25\.00\)/);
+    const p = await settled({ card: card(), captureMethod: 'manual' });
+    for (const kind of ['capture', 'refund'] as const) {
+      const res = await action(p.id, kind, { amount: 100 });
+      assert.equal(res.status, 400, kind);
+      assert.match(res.body.error.details[0].message, /renamed to amountMinor/);
+    }
+    const tok = await app.api('POST', '/tokens', { key: m.pk, body: { card: card(), amount: 5 } });
+    assert.equal(tok.body.error.details[0].message, 'is not a recognized field', 'hint only where amount existed');
+  });
+
+  it('amountMinor is in minor units: 2500 USD stays 2500 (= $25.00), 2500 JPY stays 2500 (= ¥2500)', async () => {
+    const usd = await pay({ amountMinor: 2500, currency: 'usd', card: card() });
+    const jpy = await pay({ amountMinor: 2500, currency: 'jpy', card: card() });
+    assert.equal(usd.body.amountMinor, 2500);
+    assert.equal(jpy.body.amountMinor, 2500);
+    assert.equal(jpy.body.currency, 'JPY');
+  });
+
   it('boundary values accepted: amount 1 and 99,999,999; 20 metadata keys; 500-char description', async () => {
-    for (const amount of [1, 99_999_999]) assert.equal((await pay({ amount, card: card() })).status, 202);
+    for (const amount of [1, 99_999_999]) assert.equal((await pay({ amountMinor: amount, card: card() })).status, 202);
     const meta = Object.fromEntries(Array.from({ length: 20 }, (_, i) => [`k${i}`, 'v'.repeat(500)]));
     assert.equal((await pay({ card: card(), metadata: meta, description: 'd'.repeat(500) })).status, 202);
   });
@@ -236,20 +259,20 @@ describe('§3.6 card handling', () => {
 describe('§3.6 amounts', () => {
   it('capture bounds: amount+1 → 400, 0 → 400, exact amount OK', async () => {
     const p = await settled({ card: card(), captureMethod: 'manual' });
-    assert.equal((await action(p.id, 'capture', { amount: 1001 })).status, 400);
-    assert.equal((await action(p.id, 'capture', { amount: 0 })).status, 400);
-    assert.equal((await action(p.id, 'capture', { amount: 1000 })).status, 202);
+    assert.equal((await action(p.id, 'capture', { amountMinor: 1001 })).status, 400);
+    assert.equal((await action(p.id, 'capture', { amountMinor: 0 })).status, 400);
+    assert.equal((await action(p.id, 'capture', { amountMinor: 1000 })).status, 202);
   });
 
   it('refunds are bounded by the CAPTURED amount, not the authorized amount', async () => {
     const p = await settled({ card: card(), captureMethod: 'manual' });
-    await action(p.id, 'capture', { amount: 600 });
+    await action(p.id, 'capture', { amountMinor: 600 });
     await app.settle();
-    assert.equal((await get(p.id)).body.amountCaptured, 600);
-    const over = await action(p.id, 'refund', { amount: 601 });
+    assert.equal((await get(p.id)).body.amountCapturedMinor, 600);
+    const over = await action(p.id, 'refund', { amountMinor: 601 });
     assert.equal(over.status, 400);
-    assert.match(over.body.error.details[0].message, /refundable amount \(600\)/);
-    assert.equal((await action(p.id, 'refund', { amount: 600 })).status, 202);
+    assert.match(over.body.error.details[0].message, /refundable amount \(600 in minor units\)/);
+    assert.equal((await action(p.id, 'refund', { amountMinor: 600 })).status, 202);
     await app.settle();
     assert.equal((await get(p.id)).body.status, 'refunded');
   });
@@ -258,7 +281,7 @@ describe('§3.6 amounts', () => {
     const p = await settled({ card: card() });
     const statuses: string[] = [];
     for (const amount of [300, 300, 400]) {
-      assert.equal((await action(p.id, 'refund', { amount })).status, 202);
+      assert.equal((await action(p.id, 'refund', { amountMinor: amount })).status, 202);
       await app.settle();
       statuses.push((await get(p.id)).body.status);
     }
@@ -270,27 +293,27 @@ describe('§3.6 amounts', () => {
     const p = await settled({ card: card(), captureMethod: 'manual' });
     await action(p.id, 'capture');
     await app.settle();
-    await action(p.id, 'refund', { amount: 250 });
+    await action(p.id, 'refund', { amountMinor: 250 });
     await app.settle();
     const rest = await action(p.id, 'refund');
-    assert.equal(rest.body.pendingAction.amount, 750);
+    assert.equal(rest.body.pendingAction.amountMinor, 750);
     await app.settle();
     const done = (await get(p.id)).body;
-    assert.equal(done.amountRefunded, 1000);
+    assert.equal(done.amountRefundedMinor, 1000);
     assert.equal(done.status, 'refunded');
   });
 
   it('second capture after a partial capture → 409', async () => {
     const p = await settled({ card: card(), captureMethod: 'manual' });
-    await action(p.id, 'capture', { amount: 500 });
+    await action(p.id, 'capture', { amountMinor: 500 });
     await app.settle();
-    assert.equal((await action(p.id, 'capture', { amount: 100 })).status, 409);
+    assert.equal((await action(p.id, 'capture', { amountMinor: 100 })).status, 409);
   });
 
   it('action bodies: unknown field → 400; cancel with a body field → 400', async () => {
     const p = await settled({ card: card(), captureMethod: 'manual' });
-    assert.equal((await action(p.id, 'capture', { amount: 100, reason: 'x' })).status, 400);
-    assert.equal((await action(p.id, 'cancel', { amount: 100 })).status, 400);
+    assert.equal((await action(p.id, 'capture', { amountMinor: 100, reason: 'x' })).status, 400);
+    assert.equal((await action(p.id, 'cancel', { amountMinor: 100 })).status, 400);
   });
 });
 
@@ -301,14 +324,14 @@ describe('§3.6 concurrency', () => {
     assert.deepEqual(results.map((r) => r.status).sort(), [202, ...Array(9).fill(409)]);
     await app.settle();
     const done = (await get(p.id)).body;
-    assert.ok(done.amountRefunded <= done.amountCaptured);
-    assert.equal(done.amountRefunded, 1000);
+    assert.ok(done.amountRefundedMinor <= done.amountCapturedMinor);
+    assert.equal(done.amountRefundedMinor, 1000);
   });
 
   it('refund while refunding → 409 invalid_state naming the status', async () => {
     const p = await settled({ card: card() });
-    await action(p.id, 'refund', { amount: 100 });
-    const res = await action(p.id, 'refund', { amount: 100 });
+    await action(p.id, 'refund', { amountMinor: 100 });
+    const res = await action(p.id, 'refund', { amountMinor: 100 });
     assert.equal(res.status, 409);
     assert.match(res.body.error.message, /refunding/);
   });
@@ -337,9 +360,9 @@ describe('§5.8 PATCH /payments/:id', () => {
     const p = await settled({ card: card('4000000000000002') });
     assert.equal(p.status, 'failed');
     assert.equal((await app.api('PATCH', `/payments/${p.id}`, { key: m.sk, body: {} })).status, 400);
-    const bad = await app.api('PATCH', `/payments/${p.id}`, { key: m.sk, body: { amount: 1, status: 'captured' } });
+    const bad = await app.api('PATCH', `/payments/${p.id}`, { key: m.sk, body: { amountMinor: 1, status: 'captured' } });
     assert.equal(bad.status, 400);
-    assert.deepEqual(bad.body.error.details.map((d: any) => d.field).sort(), ['amount', 'status']);
+    assert.deepEqual(bad.body.error.details.map((d: any) => d.field).sort(), ['amountMinor', 'status']);
     assert.equal((await app.api('PATCH', `/payments/${p.id}`, { key: m.sk, body: { description: 'post-mortem' } })).status, 200);
   });
 });
@@ -383,10 +406,10 @@ describe('§3.6 state machine (every status × every action)', () => {
           for (const j of Object.values(d.jobs)) if (j.paymentId === p.id) j.status = 'succeeded';
           p.status = status;
           p.authorizationCode = 'AUTH42';
-          p.amountCaptured = ['captured', 'partially_refunded', 'refunded', 'refunding'].includes(status) ? 1000 : 0;
-          p.amountRefunded = status === 'partially_refunded' ? 400 : status === 'refunded' ? 1000 : 0;
+          p.amountCapturedMinor = ['captured', 'partially_refunded', 'refunded', 'refunding'].includes(status) ? 1000 : 0;
+          p.amountRefundedMinor = status === 'partially_refunded' ? 400 : status === 'refunded' ? 1000 : 0;
           const transitional = ['pending', 'capturing', 'refunding', 'cancelling'].includes(status);
-          p.pendingAction = transitional ? { type: 'capture', amount: null, jobId: 'job_x', previousStatus: 'authorized', requestedAt: p.createdAt } : null;
+          p.pendingAction = transitional ? { type: 'capture', amountMinor: null, jobId: 'job_x', previousStatus: 'authorized', requestedAt: p.createdAt } : null;
         });
         const r = await action(res.body.id, kind);
         assert.equal(r.status, allowed ? 202 : 409, r.text);

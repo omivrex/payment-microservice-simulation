@@ -62,15 +62,15 @@ A disallowed action returns `409 invalid_state`, with a message naming the curre
 | **No cancel while `pending`** | The worker may already be talking to the processor. Allowing cancel here would create a race between "cancelled" and "authorized". The client waits for `authorized`, then cancels |
 | **No actions while an action is in flight** | Prevents, for example, two refunds that together exceed the captured amount. One pending action at a time makes the amount checks reliable |
 | **PATCH is always allowed** | Description and metadata are the merchant's own labels. They don't affect money, so there's no reason to lock them |
-| **Status can only change through actions** | `PATCH` can't set `status` or `amount`, so nobody can bypass the state machine |
+| **Status can only change through actions** | `PATCH` can't set `status` or `amountMinor`, so nobody can bypass the state machine |
 | **Partial capture releases the rest** | Matches how card networks behave: one capture per authorization. Capturing $6 of a $10 authorization leaves $4 that can't be captured later |
 
 ### Amount rules
 
-| Action | `amount` | Rule |
+| Action | `amountMinor` | Rule |
 |---|---|---|
-| capture | optional, defaults to the full `amount` | `1 ≤ amount ≤ payment.amount` |
-| refund | optional, defaults to everything still refundable | `1 ≤ amount ≤ amountCaptured − amountRefunded` |
+| capture | optional, defaults to the full `amountMinor` | `1 ≤ amountMinor ≤ payment.amountMinor` |
+| refund | optional, defaults to everything still refundable | `1 ≤ amountMinor ≤ amountCapturedMinor − amountRefundedMinor` |
 
 **Why the amount checks happen when the request is made (not in the worker):** the client gets an immediate `400` for an impossible amount, instead of an accepted request that fails a few seconds later.
 
@@ -105,17 +105,17 @@ sequenceDiagram
     API->>DB: transact: unsaved Card (encrypted number) + Token
     API-->>B: 201 { id: tok_... }
     B->>M: tok_...
-    M->>API: POST /payments (sk) { token, amount, currency }
+    M->>API: POST /payments (sk) { token, amountMinor, currency }
     API->>DB: transact: consume token, Payment(pending), Job(authorize), Event(payment.created), deliveries
     API-->>M: 202 { id: pay_..., status: pending }
 
     W->>DB: transact: claim job (lease 30s)
     W->>DB: read + decrypt card number
-    W->>P: authorize(number, amount)
+    W->>P: authorize(number, amountMinor)
     P-->>W: approved, authCode
     W->>DB: transact: Payment(capturing), Job(capture), Event(payment.authorized), delete unsaved card
     W->>DB: transact: claim capture job
-    W->>P: capture(authCode, amount)
+    W->>P: capture(authCode, amountMinor)
     P-->>W: ok
     W->>DB: transact: Payment(captured), Event(payment.captured)
 
@@ -224,9 +224,9 @@ Any card number that passes the Luhn check and isn't listed below is **approved*
 ```ts
 interface Processor {
   authorize(input: { reference: string; cardNumber: string; expMonth: number; expYear: number;
-                     amount: number; currency: string }): Promise<ProcessorResult<{ authorizationCode: string }>>;
-  capture(input: { reference: string; authorizationCode: string; amount: number }): Promise<ProcessorResult>;
-  refund(input:  { reference: string; authorizationCode: string; amount: number }): Promise<ProcessorResult>;
+                     amountMinor: number; currency: string }): Promise<ProcessorResult<{ authorizationCode: string }>>;
+  capture(input: { reference: string; authorizationCode: string; amountMinor: number }): Promise<ProcessorResult>;
+  refund(input:  { reference: string; authorizationCode: string; amountMinor: number }): Promise<ProcessorResult>;
   cancel(input:  { reference: string; authorizationCode: string }): Promise<ProcessorResult>;
 }
 
@@ -248,7 +248,7 @@ Worker tests use the fake clock, `tickOnce()` and the scripted processor describ
 |---|---|---|
 | **Every status × every action** (10 statuses × capture/refund/cancel), table-driven: allowed → `202` + transitional status. Disallowed → `409 invalid_state` naming the current status | The "allowed actions" table (§3.2), exhaustively | One forgotten combination letting money move from the wrong state |
 | `PATCH` succeeds in every status, including terminal ones | Labels never lock | – |
-| `PATCH` with `status` or `amount` → 400 naming the field | Status changes only through actions | Bypassing the state machine |
+| `PATCH` with `status` or `amountMinor` → 400 naming the field | Status changes only through actions | Bypassing the state machine |
 | Cancel while `pending` → 409 | No cancel during authorization | Race between "cancelled" and "authorized" |
 
 ### Creating payments
@@ -276,17 +276,17 @@ Worker tests use the fake clock, `tickOnce()` and the scripted processor describ
 
 | Test | Checks | Edge case guarded |
 |---|---|---|
-| Capture `amount` = authorized amount → OK. `amount + 1` → 400. `0` → 400 | Capture bounds | Capturing more than was authorized |
+| Capture `amountMinor` = authorized amount → OK. `amount + 1` → 400. `0` → 400 | Capture bounds | Capturing more than was authorized |
 | Partial capture of 600/1000, then refund 601 → 400. Refund 600 → `refunded` | Refunds are bounded by **captured**, not authorized, amount | Refunding money that was never taken |
 | Refunds 300 + 300 + 400 of 1000 → `partially_refunded`, `partially_refunded`, `refunded` | Running total | Off-by-one at the final refund |
-| No `amount` on capture/refund → full / remaining amount | Defaults | – |
+| No `amountMinor` on capture/refund → full / remaining amount | Defaults | – |
 | Second capture after a partial capture → 409 | One capture per authorization | Capturing the released remainder |
 
 ### Concurrency
 
 | Test | Checks | Edge case guarded |
 |---|---|---|
-| 10 simultaneous full refunds of one payment → exactly **one** `202`, nine `409`. Afterwards `amountRefunded ≤ amountCaptured` | One pending action at a time | Double refund through a race |
+| 10 simultaneous full refunds of one payment → exactly **one** `202`, nine `409`. Afterwards `amountRefundedMinor ≤ amountCapturedMinor` | One pending action at a time | Double refund through a race |
 | Refund while `refunding` → 409 | Same rule, sequential | – |
 | 20 due jobs, `WORKER_CONCURRENCY=5`, processor in blocking mode → never more than **5** calls in flight | Concurrency limit | The worker overwhelming the processor or memory |
 | A slow tick (blocking processor) and another `tickOnce()` → second tick doesn't run concurrently | No overlapping ticks | Two ticks together claiming more than the limit |

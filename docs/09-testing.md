@@ -83,7 +83,7 @@ Two checks run over the output of the **entire suite**, not one feature:
 
 - **Test names cite the doc section they verify**, e.g. `"§3.2 refund while refunding → 409 invalid_state"`. A failing test points straight at the rule it protects.
 - **Table-driven tests** for rule matrices (status × action, auth key × endpoint, URL × SSRF verdict). Every combination is listed explicitly, so a missing one is visible.
-- **Invariant checks after concurrency tests**: e.g. `amountRefunded ≤ amountCaptured` and "exactly one active key per type", checked after firing many requests at once.
+- **Invariant checks after concurrency tests**: e.g. `amountRefundedMinor ≤ amountCapturedMinor` and "exactly one active key per type", checked after firing many requests at once.
 - **Each bug fix comes with a test** that fails without the fix.
 
 ## 9.7 Running tests
@@ -164,7 +164,7 @@ Scenarios run in this order. Later ones reuse the merchant created by `merchants
 | Worker log carries the same `requestId` as the request that created the payment | Capture and cancel fired at the same time → exactly one accepted |
 | Manual capture: `authorized` → partial capture 2000/2500 → refund 500 → refund the rest → `refunded` (capped at the **captured** amount) | 10 simultaneous full refunds → exactly one accepted, never over-refunded; refunding a fully refunded payment → `409`; capturing a failed payment → `409` |
 | Cancel an authorized payment → `cancelled` | Negative, fractional, string, oversized or null amounts; unknown currency; no card source; two sources; a used token; `saveCard` with `cardId`; 21 metadata keys; nested metadata; typo'd fields → all `400` |
-| Test cards: declined, insufficient funds, expired, incorrect CVC → `failed` with the right code | Unknown `cardId` → `404`; `pk` can't create payments → `403`; PATCH of `status`/`amount` → `400` naming both |
+| Test cards: declined, insufficient funds, expired, incorrect CVC → `failed` with the right code | Unknown `cardId` → `404`; `pk` can't create payments → `403`; PATCH of `status`/`amountMinor` → `400` naming both |
 | PATCH merges metadata (`null` deletes a key) | Same `Idempotency-Key` → the same payment is replayed; same key with a different amount → `422`; only one payment exists |
 | `saveCard` + approval → card saved and listed | Another merchant can't get, patch or refund my payment (`404`), and my payment is untouched |
 | | `saveCard` + decline → card **not** saved; deleting a card a pending payment needs → `409` |

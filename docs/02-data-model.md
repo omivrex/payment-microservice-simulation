@@ -7,7 +7,7 @@ These rules apply to every record.
 | Convention | Rule | Why |
 |---|---|---|
 | **IDs** | `<prefix>_<32 hex chars>`, from `crypto.randomUUID()` with the dashes removed, e.g. `pay_3f9c…` | The prefix shows what an ID refers to in logs and support tickets, and stops a card ID being passed where a payment ID is expected. Random UUIDs can't be guessed or enumerated, unlike sequential numbers |
-| **Amounts** | Integers in **minor units** (`1050` = $10.50) | Floating-point maths is inexact (`0.1 + 0.2 !== 0.3`). Integers make money arithmetic exact |
+| **Amounts** | Integers in the currency's **minor (smallest) unit**, in fields whose names end in `Minor` (`amountMinor`, `amountCapturedMinor`, `amountRefundedMinor`). `1050` USD = $10.50. **JPY has no minor unit**, so `2500` JPY = ¥2500 | Floating-point maths is inexact (`0.1 + 0.2 !== 0.3`), and integers make money arithmetic exact. The `Minor` suffix puts the unit in the name, so nobody can mistake `2500` for $2,500 |
 | **Currency** | Uppercase ISO 4217 code (`USD`). Supported: USD, EUR, GBP, CAD, AUD, NGN, JPY | A standard, unambiguous code. A short list keeps validation simple |
 | **Timestamps** | ISO 8601 strings in UTC (`2026-10-15T09:30:00.000Z`) | Human-readable in the JSON file, sort correctly as plain strings, and carry no time-zone ambiguity |
 | **Nullable fields** | Use `null`, never omit the key | Every record of a type has the same keys, which makes the JSON file and API responses predictable |
@@ -44,7 +44,7 @@ Each collection is an object keyed by record ID.
 
 ```ts
 interface DatabaseSchema {
-  meta: { schemaVersion: 1 };
+  meta: { schemaVersion: 2 };   // v2: money fields renamed to *Minor (migrated automatically from v1)
   central: {
     merchants: Record<string, Merchant>;
     apiKeys: Record<string, ApiKey>;
@@ -193,11 +193,11 @@ interface Payment {
   id: string;                             // pay_…
   merchantId: string;
   status: PaymentStatus;
-  amount: number;                         // authorized/requested amount, minor units
+  amountMinor: number;                         // authorized/requested amount, minor units
   currency: string;
   captureMethod: 'automatic' | 'manual';  // automatic = capture right after authorizing
-  amountCaptured: number;
-  amountRefunded: number;
+  amountCapturedMinor: number;
+  amountRefundedMinor: number;
   customerId: string | null;
   description: string | null;             // ≤ 500 chars
   metadata: Record<string, string>;       // ≤ 20 keys; key ≤ 40 chars, value ≤ 500 chars
@@ -215,7 +215,7 @@ interface Payment {
   failure: { code: string; message: string } | null;
   pendingAction: {
     type: 'authorize' | 'capture' | 'refund' | 'cancel';
-    amount: number | null;
+    amountMinor: number | null;
     jobId: string;
     previousStatus: PaymentStatus | null; // where to return if the action fails
     requestedAt: string;
@@ -223,7 +223,7 @@ interface Payment {
   history: Array<{
     type: string;                         // e.g. 'created', 'authorized', 'refunded'
     at: string;
-    amount?: number;
+    amountMinor?: number;
     code?: string;
   }>;
   createdAt: string;
@@ -249,7 +249,7 @@ interface Job {
   merchantId: string;
   paymentId: string;
   type: 'authorize' | 'capture' | 'refund' | 'cancel';
-  amount: number | null;            // for capture/refund
+  amountMinor: number | null;            // for capture/refund
   status: 'queued' | 'running' | 'succeeded' | 'failed';
   attempts: number;
   maxAttempts: number;              // default 5
@@ -354,7 +354,7 @@ Internal fields are **never** returned. Each module has a `toView()` function th
 |---|---|
 | ApiKey | `secretHash` |
 | Card | `numberEncrypted`, `fingerprint` |
-| Payment | `sourceCardId`, `saveCardOnApproval`, `merchantId`, and `pendingAction.jobId` / `pendingAction.previousStatus` (the public `pendingAction` is `{ type, amount, requestedAt }`) |
+| Payment | `sourceCardId`, `saveCardOnApproval`, `merchantId`, and `pendingAction.jobId` / `pendingAction.previousStatus` (the public `pendingAction` is `{ type, amountMinor, requestedAt }`) |
 | WebhookEndpoint | `secretEncrypted` (the plain secret is returned once, at creation or rotation) |
 
 **Why an explicit `toView()` instead of deleting fields from the stored object:** with an allow-list, a field added later is hidden by default until someone deliberately exposes it. A block-list would leak new fields by default.

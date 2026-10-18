@@ -3,6 +3,7 @@ import { Immer } from 'immer';
 import path from 'node:path';
 import { StartupError, StorageError } from '../errors.js';
 import type { Logger } from '../logging/logger.js';
+import { migrate } from './migrations.js';
 import {
   CURRENT_SCHEMA_VERSION,
   emptyDatabase,
@@ -112,9 +113,14 @@ export class JsonDb {
         if (!isErrno(err, 'ENOENT')) throw new StartupError('Database file could not be read', { cause: err });
       }
 
-      const db = new JsonDb(opts, raw === null ? emptyDatabase() : JsonDb.#parse(raw));
+      const parsed = raw === null ? null : JsonDb.#parse(raw);
+      const db = new JsonDb(opts, parsed?.doc ?? emptyDatabase());
       if (raw === null) await db.#write(db.#data);
-      else db.#checkSize(Buffer.byteLength(raw), true);
+      else if (parsed!.migratedTo.length > 0) {
+        // Persist immediately, so the file on disk is never left in a mix of old and new shapes.
+        await db.#write(db.#data);
+        opts.logger.info('database file migrated', { toSchemaVersion: parsed!.migratedTo.at(-1) });
+      } else db.#checkSize(Buffer.byteLength(raw), true);
       return db;
     } catch (err) {
       await opts.fileOps.unlink(`${file}.lock`).catch(() => {});
@@ -122,7 +128,7 @@ export class JsonDb {
     }
   }
 
-  static #parse(raw: string): DatabaseFile {
+  static #parse(raw: string): { doc: DatabaseFile; migratedTo: number[] } {
     let parsed: unknown;
     try {
       parsed = JSON.parse(raw);
@@ -144,8 +150,8 @@ export class JsonDb {
         `Database file uses schema version ${doc.meta.schemaVersion}, newer than supported (${CURRENT_SCHEMA_VERSION}); refusing to start`,
       );
     }
-    // Migrations from older schema versions would run here. There are none yet (v1 is the first).
-    return doc as DatabaseFile;
+    const migratedTo = migrate(doc as never, CURRENT_SCHEMA_VERSION);
+    return { doc: doc as DatabaseFile, migratedTo };
   }
 
   static async #acquireLock(ops: FileOps, lockFile: string): Promise<void> {

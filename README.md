@@ -134,11 +134,14 @@ curl -s -X POST localhost:3000/tokens -H "authorization: Bearer $PK" -H 'content
   -d '{"card":{"number":"4242 4242 4242 4242","expMonth":12,"expYear":2030,"cvc":"123"}}'
 ```
 
-**4. Pay** with the token. This returns `202` with status `pending`:
+**4. Pay** with the token. This returns `202` with status `pending`.
+
+> **Amounts are in minor units.** `amountMinor` is an integer in the currency's smallest unit: `2500` with `usd` = **$25.00**, `1050` with `eur` = €10.50. JPY has no minor unit, so `2500` with `jpy` = ¥2500. Decimals such as `25.00` are rejected. Every amount field in responses and webhooks (`amountMinor`, `amountCapturedMinor`, `amountRefundedMinor`) uses the same unit.
+
 
 ```bash
 curl -s -X POST localhost:3000/payments -H "authorization: Bearer $SK" -H 'content-type: application/json' \
-  -H 'Idempotency-Key: order-1' -d '{"amount":2500,"currency":"usd","token":"tok_..."}'
+  -H 'Idempotency-Key: order-1' -d '{"amountMinor":2500,"currency":"usd","token":"tok_..."}'
 ```
 
 Within about a second the receiver prints `payment.created`, `payment.authorized` and `payment.captured` lines. If nothing arrives, check the delivery log: its `lastResponseStatus` and `lastError` say why (see the troubleshooting table in [§6.6](docs/06-webhooks.md#66-receiving-and-verifying-webhooks)):
@@ -156,7 +159,7 @@ curl -s localhost:3000/payments/pay_... -H "authorization: Bearer $SK"
 **5. Refund** part of it, then the rest:
 
 ```bash
-curl -s -X POST localhost:3000/payments/pay_.../refund -H "authorization: Bearer $SK" -H 'content-type: application/json' -d '{"amount":1000}'
+curl -s -X POST localhost:3000/payments/pay_.../refund -H "authorization: Bearer $SK" -H 'content-type: application/json' -d '{"amountMinor":1000}'
 curl -s -X POST localhost:3000/payments/pay_.../refund -H "authorization: Bearer $SK"
 ```
 

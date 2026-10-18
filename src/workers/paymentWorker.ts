@@ -116,11 +116,11 @@ export function createPaymentWorker(ctx: AppContext, services: Services, process
     if (c.job.type === 'authorize') {
       if (!c.card || !c.card.numberEncrypted) throw new CardUnavailableError();
       const cardNumber = services.vault.decryptNumber(c.card);
-      return processor.authorize({ reference, cardNumber, expMonth: c.card.expMonth, expYear: c.card.expYear, amount: c.payment.amount, currency: c.payment.currency });
+      return processor.authorize({ reference, cardNumber, expMonth: c.card.expMonth, expYear: c.card.expYear, amountMinor: c.payment.amountMinor, currency: c.payment.currency });
     }
     const authorizationCode = c.payment.authorizationCode ?? '';
-    if (c.job.type === 'capture') return processor.capture({ reference, authorizationCode, amount: c.job.amount ?? c.payment.amount });
-    if (c.job.type === 'refund') return processor.refund({ reference, authorizationCode, amount: c.job.amount ?? 0 });
+    if (c.job.type === 'capture') return processor.capture({ reference, authorizationCode, amountMinor: c.job.amountMinor ?? c.payment.amountMinor });
+    if (c.job.type === 'refund') return processor.refund({ reference, authorizationCode, amountMinor: c.job.amountMinor ?? 0 });
     return processor.cancel({ reference, authorizationCode });
   }
 
@@ -146,13 +146,13 @@ export function createPaymentWorker(ctx: AppContext, services: Services, process
     if (job.type === 'authorize') {
       if (outcome.kind === 'success') {
         p.authorizationCode = outcome.authorizationCode ?? null;
-        p.history.push({ type: 'authorized', at: now, amount: p.amount });
+        p.history.push({ type: 'authorized', at: now, amountMinor: p.amountMinor });
         settleCardAfterAuthorization(d, p, true);
         if (p.captureMethod === 'automatic') {
-          const capture = newJob(c.merchantId, p.id, 'capture', p.amount, now, job.requestId);
+          const capture = newJob(c.merchantId, p.id, 'capture', p.amountMinor, now, job.requestId);
           d.jobs[capture.id] = capture;
           p.status = 'capturing';
-          p.pendingAction = { type: 'capture', amount: p.amount, jobId: capture.id, previousStatus: 'authorized', requestedAt: now };
+          p.pendingAction = { type: 'capture', amountMinor: p.amountMinor, jobId: capture.id, previousStatus: 'authorized', requestedAt: now };
         } else {
           p.status = 'authorized';
           p.pendingAction = null;
@@ -181,18 +181,18 @@ export function createPaymentWorker(ctx: AppContext, services: Services, process
 
     // capture / refund / cancel
     if (outcome.kind === 'success') {
-      const amount = job.amount ?? 0;
+      const amount = job.amountMinor ?? 0;
       if (job.type === 'capture') {
         p.status = 'captured';
-        p.amountCaptured = amount;
-        p.history.push({ type: 'captured', at: now, amount });
+        p.amountCapturedMinor = amount;
+        p.history.push({ type: 'captured', at: now, amountMinor: amount });
         p.pendingAction = null;
         touch();
         emit('payment.captured');
       } else if (job.type === 'refund') {
-        p.amountRefunded += amount;
-        p.status = p.amountRefunded >= p.amountCaptured ? 'refunded' : 'partially_refunded';
-        p.history.push({ type: 'refunded', at: now, amount });
+        p.amountRefundedMinor += amount;
+        p.status = p.amountRefundedMinor >= p.amountCapturedMinor ? 'refunded' : 'partially_refunded';
+        p.history.push({ type: 'refunded', at: now, amountMinor: amount });
         p.pendingAction = null;
         touch();
         emit(p.status === 'refunded' ? 'payment.refunded' : 'payment.partially_refunded');

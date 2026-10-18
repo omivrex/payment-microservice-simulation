@@ -277,7 +277,7 @@ The lock is deleted on graceful shutdown (`SIGINT` / `SIGTERM`), after all queue
 3. Read `db.json`:
    - **missing** → create it with defaults;
    - **invalid JSON** → **refuse to start** and leave the file untouched;
-   - **valid** → run any migrations from `meta.schemaVersion` up to the current version;
+   - **valid** → run any migrations from `meta.schemaVersion` up to the current version, then write the upgraded file straight away. For example, v1 → v2 renamed the money fields to `amountMinor` / `amountCapturedMinor` / `amountRefundedMinor`, including inside event snapshots and stored idempotent responses, so replays and webhooks after an upgrade use the new names;
    - **`schemaVersion` newer than this code supports** → **refuse to start** and leave the file untouched. Older code can't know what a newer version changed, and writing to the file would damage that data.
 4. Check the file size against `DB_WARN_SIZE_MB` and log a warning if it's over (§7.9).
 5. Start the HTTP server and the background loops.

@@ -55,7 +55,7 @@ afterEach(async () => {
 });
 
 const register = (url: string) => app.api('POST', '/webhooks', { key: m.sk, body: { url, events: ['*'] } });
-const pay = () => app.api('POST', '/payments', { key: m.sk, body: { amount: 2500, currency: 'usd', card: card() } });
+const pay = () => app.api('POST', '/payments', { key: m.sk, body: { amountMinor: 2500, currency: 'usd', card: card() } });
 const deliveries = (endpointId: string) => app.ctx.db.read(m.id, (d) => Object.values(d.webhookDeliveries).filter((x) => x.endpointId === endpointId));
 
 describe('README: webhook receiver script and registration', () => {
