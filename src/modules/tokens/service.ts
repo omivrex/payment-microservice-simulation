@@ -1,5 +1,5 @@
 import { addMs, isoNow, type Clock } from '../../clock.js';
-import type { JsonDb } from '../../db/jsonDb.js';
+import { getOwn, type InTransaction, type JsonDb } from '../../db/jsonDb.js';
 import type { Card, MerchantData, Token } from '../../db/schema.js';
 import { ValidationError } from '../../errors.js';
 import { newId } from '../../ids.js';
@@ -23,15 +23,17 @@ export class TokensService {
     private readonly clock: Clock,
   ) {}
 
-  async create(merchantId: string, input: CardInput): Promise<TokenView> {
+  async create(merchantId: string, input: CardInput, inTx?: InTransaction<TokenView>): Promise<TokenView> {
     const card = this.vault.build(merchantId, input, { saved: false, customerId: null });
     const now = isoNow(this.clock);
     const token: Token = { id: newId('tok'), merchantId, cardId: card.id, expiresAt: addMs(now, TOKEN_TTL_MS), usedAt: null, createdAt: now };
+    const view = toTokenView(token, card);
     await this.db.transact(merchantId, (d) => {
       d.cards[card.id] = card;
       d.tokens[token.id] = token;
+      inTx?.(d, view);
     });
-    return toTokenView(token, card);
+    return view;
   }
 }
 
@@ -40,7 +42,7 @@ export class TokensService {
  * Unknown, other-merchant, expired and used tokens all fail identically (no existence leak).
  */
 export function consumeToken(d: MerchantData, tokenId: string, now: string): Card {
-  const token = d.tokens[tokenId];
+  const token = getOwn(d.tokens, tokenId);
   const card = token ? d.cards[token.cardId] : undefined;
   if (!token || !card || token.usedAt !== null || token.expiresAt <= now) {
     throw new ValidationError([{ field: 'token', message: 'is invalid, expired or already used' }]);

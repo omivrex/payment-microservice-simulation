@@ -164,22 +164,25 @@ To rotate the master key:
 
 ### The hashing secret
 
-`HASHING_SECRET` is used through **HKDF** (a standard function for deriving separate keys from one secret) to produce two independent sub-keys:
+`HASHING_SECRET` is used through **HKDF** (a standard function for deriving separate keys from one secret) to produce three independent sub-keys:
 
 | Sub-key (HKDF label) | Used for |
 |---|---|
 | `api-key-hash` | `secretHash` of secret API keys |
 | `card-fingerprint` | `Card.fingerprint` |
+| `idempotency-request` | `IdempotencyRecord.requestHash`, the hash of an idempotent request's body |
+
+**Why the request hash is keyed too:** the bodies of `POST /tokens`, `POST /cards` and `POST /payments` can contain a full card number and CVC. Everything else on the card (brand, last 4, expiry) is stored in plain text, so only about 10^8 combinations are left per card prefix, and a GPU tries those in minutes. A plain SHA-256 of the body would let anyone with a copy of the file recover the number and CVC (T1). With an HMAC, guessing requires the secret.
 
 **Why derive sub-keys:** one secret to manage, but each purpose gets its own key (*domain separation*), so a fingerprint can never be confused with or substituted for a key hash.
 
 **Why fingerprint with HMAC instead of comparing ciphertexts:** GCM uses a random IV, so encrypting the same card twice gives two different ciphertexts. A keyed hash is deterministic, which makes equality checks possible. Being keyed, it also can't be brute-forced from a leaked file (card numbers have little enough entropy that a plain SHA-256 could be).
 
-⚠️ **`HASHING_SECRET` can't be rotated without impact:** changing it invalidates every secret API key (merchants must rotate) and every fingerprint (duplicate detection restarts). Generate it once and protect it like a master key.
+⚠️ **`HASHING_SECRET` can't be rotated without impact:** changing it invalidates every secret API key (merchants must rotate), every fingerprint (duplicate detection restarts) and, for up to 24 h, stored idempotency records (a retry with an existing key gets `422`). Generate it once and protect it like a master key.
 
 ## 4.5 CVC
 
-The CVC is checked for format (3–4 digits) when the request arrives, then **dropped**. It's never written to the database, logs or job payloads.
+The CVC is checked for format (3–4 digits) when the request arrives, then **dropped**. It's never written to the database, logs or job payloads, and nothing derived from it is either, apart from the keyed idempotency hash (§4.4), which can't be reversed without `HASHING_SECRET`.
 
 **Why:** PCI DSS explicitly forbids storing "sensitive authentication data" such as the CVC after authorization, even encrypted. Its whole purpose is to prove the cardholder has the physical card *right now*; a stored copy defeats that. This is also why charging a **saved card** doesn't ask for a CVC.
 
@@ -188,6 +191,7 @@ The CVC is checked for format (3–4 digits) when the request arrives, then **dr
 - Every module function takes the authenticated `merchantId` as its first argument.
 - Data access goes through **scoped** database calls: `db.read(merchantId, …)` / `db.transact(merchantId, …)` (see [Persistence §7.2](07-persistence.md#72-interface-scoped-transactions)). The callback receives **only that merchant's subtree** of the database.
 - Looking up another merchant's ID therefore finds nothing, and the response is exactly the same as for a missing record: **404**.
+- Records are looked up by client-supplied IDs with `getOwn(map, id)` (an `Object.hasOwn` check), never `map[id]`. A plain lookup also finds built-in properties: `GET /cards/constructor` would have returned a 500, and `POST /webhooks/constructor/rotate-secret` would have written to the global `Object` constructor.
 
 **Why structural isolation instead of `record.merchantId === merchantId` checks:** a check has to be written in every lookup, and a single forgotten one leaks data. With scoped access there's nothing to forget: other merchants' records simply aren't reachable from the callback.
 
@@ -305,6 +309,7 @@ The service listens on plain HTTP and expects a **reverse proxy** (nginx, Caddy,
 | Same card number → same fingerprint. Different numbers → different fingerprints | Deterministic, keyed hash | Duplicate detection failing |
 | Same number under a different `HASHING_SECRET` → different fingerprint | The hash is keyed | Fingerprints being guessable from a leaked file |
 | The `api-key-hash` and `card-fingerprint` sub-keys differ | Domain separation | One kind of hash standing in for the other |
+| An idempotent `POST /cards` with a raw card → the stored `requestHash` is the keyed hash, not the plain SHA-256 of the body | Keyed request hash | Card number and CVC brute-forced from a leaked file |
 | Comparing hashes of **different lengths** returns `false` without throwing | `timingSafeEqual` wrapper | `timingSafeEqual` throws on a length mismatch, which would turn into a 500 |
 
 ### API keys and authentication
@@ -333,6 +338,7 @@ The service listens on plain HTTP and expects a **reverse proxy** (nginx, Caddy,
 | B's list endpoints never include A's records | Scoped reads | A list query leaking across merchants |
 | B pays with A's `cardId` → `404`. With A's token → the same `400` as an unknown token | Isolation for card sources | Charging another merchant's customer's card |
 | A and B use the same `Idempotency-Key` → independent results | Keys scoped per merchant | One merchant receiving a replay of another merchant's response |
+| IDs `constructor`, `toString`, `hasOwnProperty`, `__proto__` on every card, payment, event and webhook route, and as a payment's `cardId` / `token` → `404` (`400` for the token); the global `Object` is unchanged | Own-property lookups (§4.6) | A 500, or a write to a built-in object, from an ID that matches an inherited property |
 
 ### SSRF (fake DNS resolver)
 

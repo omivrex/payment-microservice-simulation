@@ -261,12 +261,20 @@ flowchart TD
     A["Start"] --> B{"Create db.json.lock<br/>exclusively"}
     B -->|"created"| OK["Lock acquired"]
     B -->|"already exists"| C["Read PID from lock file"]
-    C --> D{"Is that process<br/>still running?"}
+    C --> P{"Is it our<br/>own PID?"}
+    P -->|"yes"| H{"Do we hold<br/>this lock?"}
+    H -->|"yes"| X
+    H -->|"no (left by an earlier<br/>process with our PID)"| E
+    P -->|"no"| D{"Is that process<br/>still running?"}
     D -->|"yes"| X["Refuse to start:<br/>another instance owns the database"]
     D -->|"no (stale lock<br/>from a crash)"| E["Replace lock with our PID"] --> OK
 ```
 
 The lock is deleted on graceful shutdown (`SIGINT` / `SIGTERM`), after all queued transactions finish.
+
+**Why check for our own PID:** in a container the service often gets the same PID on every start (frequently 1). After a crash, the lock left behind holds that PID, and `process.kill(pid, 0)` succeeds on the *current* process, so without this check the service would refuse to start until someone deleted the lock by hand. The process keeps a list of the locks it holds, so a second `open()` of the same file in the same process is still refused.
+
+**Known limitation:** the liveness check is PID-based. If an unrelated process happens to be using the PID from a stale lock, startup is refused until the lock is deleted. Taking over a stale lock (read, delete, re-create) is also not atomic, so two processes starting at the same instant could in theory both take it. Closing both gaps needs an OS-level lock (`flock`) or a lock library, which isn't worth a dependency for a single-instance service.
 
 **Why:** each process holds its own in-memory copy of the data. Two processes on the same file would each overwrite the other's commits: silent data loss, the worst kind. The lock turns that into a loud failure at startup.
 
@@ -410,6 +418,7 @@ We weighed these options when deciding how to deal with growth. Two were **adopt
 |---|---|---|
 | Second `open()` on the same file while the first holds it → error, first instance unaffected | Lock (§7.7) | Two writers silently overwriting each other |
 | Lock file containing the PID of a process that has exited (spawn a child, wait for it to exit, use its PID) → lock taken over | Stale lock recovery | Never being able to start again after a crash |
+| Lock file containing **our own** PID that this process doesn't hold → lock taken over; a second `open()` is still refused | PID reused after a crash | A container that can never restart because the new process has the old one's PID |
 | `close()` → lock file removed, and a new `open()` succeeds | Clean release | – |
 
 ### File operations

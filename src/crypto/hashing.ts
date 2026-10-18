@@ -1,4 +1,4 @@
-import { createHash, createHmac, hkdfSync, randomBytes, timingSafeEqual } from 'node:crypto';
+import { createHmac, hkdfSync, randomBytes, timingSafeEqual } from 'node:crypto';
 
 /**
  * Keyed hashing with domain-separated sub-keys derived from HASHING_SECRET.
@@ -7,11 +7,13 @@ import { createHash, createHmac, hkdfSync, randomBytes, timingSafeEqual } from '
 export class Hasher {
   readonly #apiKeyKey: Buffer;
   readonly #fingerprintKey: Buffer;
+  readonly #requestKey: Buffer;
 
   constructor(secret: Buffer) {
     if (secret.length < 32) throw new Error('HASHING_SECRET must be at least 32 bytes');
     this.#apiKeyKey = Buffer.from(hkdfSync('sha256', secret, Buffer.alloc(0), 'api-key-hash', 32));
     this.#fingerprintKey = Buffer.from(hkdfSync('sha256', secret, Buffer.alloc(0), 'card-fingerprint', 32));
+    this.#requestKey = Buffer.from(hkdfSync('sha256', secret, Buffer.alloc(0), 'idempotency-request', 32));
   }
 
   hashApiKeySecret(secret: string): string {
@@ -20,6 +22,14 @@ export class Hasher {
 
   fingerprintCard(cardNumber: string): string {
     return createHmac('sha256', this.#fingerprintKey).update(cardNumber).digest('hex');
+  }
+
+  /**
+   * Hash of an idempotent request body (canonical JSON). Keyed, because bodies can hold a card
+   * number and CVC: a plain hash of those could be brute-forced from a copy of the database file.
+   */
+  hashRequestBody(canonicalBody: string): string {
+    return createHmac('sha256', this.#requestKey).update(canonicalBody).digest('hex');
   }
 }
 
@@ -36,8 +46,6 @@ export function safeEqual(a: string, b: string): boolean {
 
 /** 256 bits of randomness, base64url (43 chars). */
 export const randomSecret = (): string => randomBytes(32).toString('base64url');
-
-export const sha256Hex = (input: string): string => createHash('sha256').update(input).digest('hex');
 
 /** JSON with object keys sorted recursively, so equivalent bodies hash the same (docs/05-api.md §5.1). */
 export function canonicalJson(value: unknown): string {

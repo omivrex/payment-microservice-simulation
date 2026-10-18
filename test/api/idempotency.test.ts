@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { after, before, describe, it } from 'node:test';
 import { Encryptor } from '../../src/crypto/encryption.ts';
+import { canonicalJson } from '../../src/crypto/hashing.ts';
 import { card, createMerchant, type TestMerchant } from '../helpers/fixtures.ts';
 import { DAY, SECOND } from '../helpers/fakeClock.ts';
 import { startTestApp, type TestApp } from '../helpers/testApp.ts';
@@ -8,6 +10,8 @@ import { startTestApp, type TestApp } from '../helpers/testApp.ts';
 let app: TestApp;
 let m: TestMerchant;
 let failNextEncrypt = false;
+/** Runs once, just before the next encryption: after the reservation, before the action's transaction. */
+let beforeNextEncrypt: (() => void) | null = null;
 
 before(async () => {
   app = await startTestApp({
@@ -15,6 +19,9 @@ before(async () => {
       const real = ctx.encryptor;
       const flaky = Object.create(real) as Encryptor;
       flaky.encrypt = (plaintext: string, aad: string) => {
+        const hook = beforeNextEncrypt;
+        beforeNextEncrypt = null;
+        hook?.();
         if (failNextEncrypt) {
           failNextEncrypt = false;
           throw new TypeError('simulated bug');
@@ -134,6 +141,53 @@ describe('§5.11 idempotency', () => {
     const retry = await post(m.sk, body, 'k-5xx');
     assert.equal(retry.status, 201);
     assert.equal(retry.headers.get('idempotent-replayed'), null);
+  });
+
+  it('the request body is stored only as a keyed hash (it can hold a card number and CVC)', async () => {
+    const body = { card: card('4000056655665556'), customerId: 'cus_hmac' };
+    await post(m.sk, body, 'k-hmac');
+    const stored = app.ctx.db.read(m.id, (d) => d.idempotency['POST:/cards:k-hmac']!.requestHash);
+    assert.notEqual(stored, createHash('sha256').update(canonicalJson(body)).digest('hex'), 'not a plain SHA-256 that could be brute-forced');
+    assert.equal(stored, app.ctx.hasher.hashRequestBody(canonicalJson(body)));
+  });
+
+  it('a successful response is stored in the same transaction as the action (no separate write to lose)', async () => {
+    const db = app.ctx.db;
+    const original = db.transact;
+    let transactions = 0;
+    db.transact = ((...args: Parameters<typeof original>) => {
+      transactions++;
+      return original.apply(db, args);
+    }) as typeof original;
+    let res;
+    try {
+      res = await post(m.pk, { card: card() }, 'k-atomic', '/tokens');
+    } finally {
+      db.transact = original;
+    }
+    assert.equal(res.status, 201);
+    assert.equal(transactions, 2, 'reserve + action only');
+    const record = db.read(m.id, (d) => d.idempotency['POST:/tokens:k-atomic']!);
+    assert.equal(record.status, 'completed');
+    assert.equal(record.responseStatus, 201);
+    assert.deepEqual(record.responseBody, res.body);
+  });
+
+  it('if a retry reclaimed the reservation while the original was still running, the original rolls back (409) instead of acting twice', async () => {
+    const recordId = 'POST:/tokens:k-reclaimed';
+    const tokensBefore = app.ctx.db.read(m.id, (d) => Object.keys(d.tokens).length);
+    beforeNextEncrypt = () => {
+      // Simulates a retry 61 s later taking over the reservation (same body, later createdAt).
+      const later = new Date(app.clock.now().getTime() + 61 * SECOND).toISOString();
+      void app.ctx.db.transact(m.id, (d) => {
+        d.idempotency[recordId]!.createdAt = later;
+      });
+    };
+    const res = await post(m.pk, { card: card() }, 'k-reclaimed', '/tokens');
+    assert.equal(res.status, 409);
+    assert.equal(res.body.error.code, 'idempotency_in_progress');
+    assert.equal(app.ctx.db.read(m.id, (d) => Object.keys(d.tokens).length), tokensBefore, 'no token created');
+    assert.equal(app.ctx.db.read(m.id, (d) => d.idempotency[recordId]!.status), 'in_progress', "the retry's reservation is left alone");
   });
 
   it('invalid Idempotency-Key values → 400', async () => {

@@ -51,7 +51,7 @@ export function createApp(ctx: AppContext, services: Services = createServices(c
       secret: [requireKey(services.apiKeys, ['secret']), general],
       any: [requireKey(services.apiKeys, ['secret', 'publishable']), general],
     },
-    idempotency: idempotency(ctx.db, ctx.clock),
+    idempotency: idempotency(ctx.db, ctx.clock, ctx.hasher),
     tokensLimiter: tokensLimiter(ctx.config.rateLimits.tokensPerMinute),
   };
 

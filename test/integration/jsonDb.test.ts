@@ -199,6 +199,14 @@ describe('§7.12 single-process lock', () => {
     await db.close();
   });
 
+  it('takes over a lock carrying our own PID, left by an earlier process (PID reused after a crash)', async () => {
+    await writeFile(`${file}.lock`, String(process.pid));
+    const db = await open();
+    assert.equal((await readFile(`${file}.lock`, 'utf8')).trim(), String(process.pid));
+    await assert.rejects(open(), /locked by another running process/, 'still held against a second open in this process');
+    await db.close();
+  });
+
   it('close() removes the lock so the file can be reopened', async () => {
     const db = await open();
     await db.close();

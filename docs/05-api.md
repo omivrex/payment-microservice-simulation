@@ -39,11 +39,11 @@ Endpoints marked **⟳ idempotent** accept an optional `Idempotency-Key` header 
 
 | Situation | Response |
 |---|---|
-| First request with a key | Processed normally. The response is stored for 24 h |
+| First request with a key | Processed normally. The response is stored for 24 h, in the same transaction as the action itself |
 | Same key, same body | The **stored response is replayed**, with header `Idempotent-Replayed: true` |
 | Same key, different body | `422 idempotency_key_reused` |
 | Same key while the first request is still running | `409 idempotency_in_progress` |
-| Same key, but the first request's reservation is over 60 s old and never completed | Treated as **abandoned**: the request runs normally |
+| Same key, but the first request's reservation is over 60 s old and never completed | Treated as **abandoned**: the request runs normally. If the first request does finish after all, it is rolled back with `409 idempotency_in_progress`, so the action still happens only once |
 | First request failed with a **5xx** | **Not stored**: the key is released, so a retry runs again (see [Error handling §8.11](08-error-handling.md#811-errors-and-idempotency)) |
 
 Keys are scoped per merchant **and** per request path (e.g. `/payments/pay_123/refund`). **Why the full path rather than the endpoint pattern:** with a pattern, the same key used to refund two *different* payments would collide, and the second refund would replay the first one's response.
@@ -52,9 +52,11 @@ Keys are scoped per merchant **and** per request path (e.g. `/payments/pay_123/r
 
 **Why endpoints that return secrets are *not* idempotent** (`/api-keys/rotate`, `POST /webhooks`, `/webhooks/:id/rotate-secret`): replaying a response means storing it, and those responses contain a plain secret that we deliberately never store.
 
-"Same body" is compared on **canonical JSON** (keys sorted), so `{"a":1,"b":2}` and `{"b":2,"a":1}` count as the same request.
+"Same body" is compared on **canonical JSON** (keys sorted), so `{"a":1,"b":2}` and `{"b":2,"a":1}` count as the same request. The body itself is never stored, only a keyed hash of it (it can contain a card number and CVC; see [Security §4.4](04-security.md#the-hashing-secret)).
 
-**Why abandon reservations after 60 s:** if the process crashes mid-request, the reservation stays `in_progress`, and without this rule the key would answer `409` for 24 hours to a client that's just trying to retry. No request legitimately takes 60 s.
+**Why store the response in the action's own transaction:** if it were written afterwards, a crash or a failed write in between would leave the payment created (or the refund queued) but the key still `in_progress`. 60 s later a retry would treat it as abandoned and do it a second time.
+
+**Why abandon reservations after 60 s:** if the process crashes mid-request, the reservation stays `in_progress`, and without this rule the key would answer `409` for 24 hours to a client that's just trying to retry. Because the response is stored atomically with the action, an `in_progress` reservation means the action never committed, so running the retry is safe.
 
 **Why canonical JSON:** different JSON libraries order keys differently, and a client retrying the *same* request must not get a `422`.
 
@@ -477,6 +479,8 @@ These are API-level tests: the real app over HTTP. Payment states are tested in 
 | Same key + different body → `422` | Misuse detection | Replaying a response for a different request |
 | Same key while the first is still running (blocking processor) → `409 idempotency_in_progress` | In-progress guard | Two requests both doing the work |
 | Reservation left `in_progress` (simulated crash), clock +61 s → the retry runs | Abandoned reservations | A key blocked for 24 h after a crash |
+| A successful request uses exactly two transactions (reserve, then action + response) and the record is `completed` with the sent response | Response stored atomically with the action | A crash between the action and the response turning a retry into a duplicate payment or refund |
+| A retry takes over the reservation while the original is still running → the original gets `409` and creates nothing | Reclaimed reservations | Both requests acting |
 | Same key on two different endpoints → independent | Per-endpoint scope | A refund replaying a capture's response |
 | Key reused after 24 h (fake clock) → processed again | Expiry | – |
 | First request fails with a 5xx → the retry runs again | 5xx not stored ([Error handling §8.11](08-error-handling.md#811-errors-and-idempotency)) | A permanent replay of a temporary failure |

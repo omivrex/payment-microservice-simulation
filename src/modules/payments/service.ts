@@ -1,5 +1,5 @@
 import { isoNow, type Clock } from '../../clock.js';
-import type { JsonDb } from '../../db/jsonDb.js';
+import { getOwn, type InTransaction, type JsonDb } from '../../db/jsonDb.js';
 import type { Card, Job, JobType, MerchantData, Payment, PaymentStatus } from '../../db/schema.js';
 import { InvalidStateError, NotFoundError, ValidationError } from '../../errors.js';
 import { newId } from '../../ids.js';
@@ -65,7 +65,7 @@ export class PaymentsService {
     private readonly clock: Clock,
   ) {}
 
-  async create(merchantId: string, input: CreatePaymentInput, requestId: string | null): Promise<PaymentView> {
+  async create(merchantId: string, input: CreatePaymentInput, requestId: string | null, inTx?: InTransaction<PaymentView>): Promise<PaymentView> {
     const rawCard = 'card' in input.source ? this.vault.build(merchantId, input.source.card, { saved: false, customerId: null }) : null;
     const now = isoNow(this.clock);
 
@@ -73,7 +73,7 @@ export class PaymentsService {
       let card: Card;
       if ('token' in input.source) card = consumeToken(d, input.source.token, now);
       else if ('cardId' in input.source) {
-        const saved = d.cards[input.source.cardId];
+        const saved = getOwn(d.cards, input.source.cardId);
         if (!saved || !saved.saved) throw new NotFoundError('Card', input.source.cardId);
         card = saved;
       } else {
@@ -116,12 +116,13 @@ export class PaymentsService {
       d.jobs[job.id] = job;
       const view = toPaymentView(payment);
       recordEvent(d, merchantId, 'payment.created', view as never, now);
+      inTx?.(d, view);
       return view;
     });
   }
 
   get(merchantId: string, paymentId: string): PaymentView {
-    const payment = this.db.read(merchantId, (d) => d.payments[paymentId]);
+    const payment = this.db.read(merchantId, (d) => getOwn(d.payments, paymentId));
     if (!payment) throw new NotFoundError('Payment', paymentId);
     return toPaymentView(payment);
   }
@@ -159,8 +160,8 @@ export class PaymentsService {
     });
   }
 
-  capture(merchantId: string, paymentId: string, amountMinor: number | undefined, requestId: string | null): Promise<PaymentView> {
-    return this.#requestAction(merchantId, paymentId, 'capture', requestId, (p) => {
+  capture(merchantId: string, paymentId: string, amountMinor: number | undefined, requestId: string | null, inTx?: InTransaction<PaymentView>): Promise<PaymentView> {
+    return this.#requestAction(merchantId, paymentId, 'capture', requestId, inTx, (p) => {
       if (p.status !== 'authorized') return null;
       const toCapture = amountMinor ?? p.amountMinor;
       if (toCapture > p.amountMinor) {
@@ -170,8 +171,8 @@ export class PaymentsService {
     });
   }
 
-  refund(merchantId: string, paymentId: string, amountMinor: number | undefined, requestId: string | null): Promise<PaymentView> {
-    return this.#requestAction(merchantId, paymentId, 'refund', requestId, (p) => {
+  refund(merchantId: string, paymentId: string, amountMinor: number | undefined, requestId: string | null, inTx?: InTransaction<PaymentView>): Promise<PaymentView> {
+    return this.#requestAction(merchantId, paymentId, 'refund', requestId, inTx, (p) => {
       if (p.status !== 'captured' && p.status !== 'partially_refunded') return null;
       const refundable = p.amountCapturedMinor - p.amountRefundedMinor;
       const toRefund = amountMinor ?? refundable;
@@ -182,8 +183,8 @@ export class PaymentsService {
     });
   }
 
-  cancel(merchantId: string, paymentId: string, requestId: string | null): Promise<PaymentView> {
-    return this.#requestAction(merchantId, paymentId, 'cancel', requestId, (p) =>
+  cancel(merchantId: string, paymentId: string, requestId: string | null, inTx?: InTransaction<PaymentView>): Promise<PaymentView> {
+    return this.#requestAction(merchantId, paymentId, 'cancel', requestId, inTx, (p) =>
       p.status === 'authorized' ? { amountMinor: null, nextStatus: 'cancelling' } : null,
     );
   }
@@ -197,6 +198,7 @@ export class PaymentsService {
     paymentId: string,
     type: Exclude<JobType, 'authorize'>,
     requestId: string | null,
+    inTx: InTransaction<PaymentView> | undefined,
     plan: (p: Payment) => { amountMinor: number | null; nextStatus: PaymentStatus } | null,
   ): Promise<PaymentView> {
     const now = isoNow(this.clock);
@@ -209,13 +211,15 @@ export class PaymentsService {
       p.pendingAction = { type, amountMinor: planned.amountMinor, jobId: job.id, previousStatus: p.status, requestedAt: now };
       p.status = planned.nextStatus;
       p.updatedAt = now;
-      return toPaymentView(p);
+      const view = toPaymentView(p);
+      inTx?.(d, view);
+      return view;
     });
   }
 }
 
 export function findPayment(d: MerchantData, paymentId: string): Payment {
-  const p = d.payments[paymentId];
+  const p = getOwn(d.payments, paymentId);
   if (!p) throw new NotFoundError('Payment', paymentId);
   return p;
 }

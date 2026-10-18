@@ -15,6 +15,7 @@ import {
   type OpenApiModule,
 } from '../../http/openapi.js';
 import { ValidationError } from '../../errors.js';
+import { storeResponse } from '../../http/middleware/idempotency.js';
 import type { RouteDeps } from '../../http/routeDeps.js';
 import { paginationQuery, parseBody, parseOptionalBody, parseQuery } from '../../http/validate.js';
 import { cardInputSchema, customerIdSchema } from '../cards/cardInput.js';
@@ -100,6 +101,7 @@ export function paymentsRouter({ services, auth, idempotency }: RouteDeps): Rout
         metadata: body.metadata ?? {},
       },
       req.requestId,
+      storeResponse(req, 202),
     );
     res.status(202).json(payment);
   });
@@ -123,17 +125,17 @@ export function paymentsRouter({ services, auth, idempotency }: RouteDeps): Rout
 
   route(router, 'post', '/payments/:id/capture', ...auth.secret, idempotency, async (req, res) => {
     const { amountMinor } = parseOptionalBody(amountBodySchema, req.body, RENAMED);
-    res.status(202).json(await services.payments.capture(req.auth!.merchantId, req.params.id as string, amountMinor, req.requestId));
+    res.status(202).json(await services.payments.capture(req.auth!.merchantId, req.params.id as string, amountMinor, req.requestId, storeResponse(req, 202)));
   });
 
   route(router, 'post', '/payments/:id/refund', ...auth.secret, idempotency, async (req, res) => {
     const { amountMinor } = parseOptionalBody(amountBodySchema, req.body, RENAMED);
-    res.status(202).json(await services.payments.refund(req.auth!.merchantId, req.params.id as string, amountMinor, req.requestId));
+    res.status(202).json(await services.payments.refund(req.auth!.merchantId, req.params.id as string, amountMinor, req.requestId, storeResponse(req, 202)));
   });
 
   route(router, 'post', '/payments/:id/cancel', ...auth.secret, idempotency, async (req, res) => {
     parseOptionalBody(emptyBodySchema, req.body);
-    res.status(202).json(await services.payments.cancel(req.auth!.merchantId, req.params.id as string, req.requestId));
+    res.status(202).json(await services.payments.cancel(req.auth!.merchantId, req.params.id as string, req.requestId, storeResponse(req, 202)));
   });
 
   return router;

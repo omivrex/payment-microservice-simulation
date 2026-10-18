@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { after, before, describe, it } from 'node:test';
 import { registeredRoutes, toOpenApiPath } from '../../src/http/openapi.ts';
+import { createMerchant } from '../helpers/fixtures.ts';
 import { startTestApp, type TestApp } from '../helpers/testApp.ts';
 
 let app: TestApp;
@@ -48,6 +49,45 @@ describe('§8.5 request IDs', () => {
     for (const bad of ['has space', 'x'.repeat(65), 'a"b', 'a\tb']) {
       const res = await app.api('GET', '/health', { headers: { 'x-request-id': bad } });
       assert.match(res.headers.get('x-request-id')!, /^req_[0-9a-f]{32}$/, JSON.stringify(bad));
+    }
+  });
+});
+
+describe('§8.4 ids that match built-in object properties', () => {
+  const names = ['constructor', 'toString', 'hasOwnProperty', '__proto__'];
+
+  it('are unknown records (404), never a 500 or a write to a built-in object', async () => {
+    const m = await createMerchant(app);
+    const requests: Array<[string, string, unknown?]> = [];
+    for (const id of names) {
+      requests.push(
+        ['GET', `/cards/${id}`],
+        ['DELETE', `/cards/${id}`],
+        ['GET', `/payments/${id}`],
+        ['PATCH', `/payments/${id}`, { description: 'x' }],
+        ['POST', `/payments/${id}/cancel`],
+        ['GET', `/events/${id}`],
+        ['GET', `/webhooks/${id}`],
+        ['PATCH', `/webhooks/${id}`, { enabled: false }],
+        ['POST', `/webhooks/${id}/rotate-secret`],
+        ['GET', `/webhooks/${id}/deliveries`],
+      );
+    }
+    for (const [method, url, body] of requests) {
+      const res = await app.api(method, url, { key: m.sk, ...(body ? { body } : {}) });
+      assert.equal(res.status, 404, `${method} ${url} → ${res.status} ${res.text}`);
+    }
+    assert.equal(Object.hasOwn(Object, 'secretEncrypted'), false, 'Object constructor not modified');
+    assert.equal(Object.hasOwn(Object, 'description'), false, 'Object constructor not modified');
+  });
+
+  it('as a payment source, are unknown cards and tokens', async () => {
+    const m = await createMerchant(app);
+    for (const id of names) {
+      const byCard = await app.api('POST', '/payments', { key: m.sk, body: { amountMinor: 100, currency: 'USD', cardId: id } });
+      assert.equal(byCard.status, 404, `cardId ${id} → ${byCard.status}`);
+      const byToken = await app.api('POST', '/payments', { key: m.sk, body: { amountMinor: 100, currency: 'USD', token: id } });
+      assert.equal(byToken.status, 400, `token ${id} → ${byToken.status}`);
     }
   });
 });

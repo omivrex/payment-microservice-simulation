@@ -10,6 +10,7 @@ import {
   route,
   type OpenApiModule,
 } from '../../http/openapi.js';
+import { storeResponse } from '../../http/middleware/idempotency.js';
 import type { RouteDeps } from '../../http/routeDeps.js';
 import { parseBody } from '../../http/validate.js';
 import { cardInputOpenApi, cardInputSchema } from '../cards/cardInput.js';
@@ -21,7 +22,7 @@ export function tokensRouter({ services, auth, tokensLimiter, idempotency }: Rou
 
   route(router, 'post', '/tokens', ...auth.any, tokensLimiter, idempotency, async (req, res) => {
     const { card } = parseBody(createTokenSchema, req.body);
-    res.status(201).json(await services.tokens.create(req.auth!.merchantId, card));
+    res.status(201).json(await services.tokens.create(req.auth!.merchantId, card, storeResponse(req, 201)));
   });
 
   return router;

@@ -323,11 +323,13 @@ sequenceDiagram
 
 | First response to an `Idempotency-Key` | Stored and replayed? | Why |
 |---|---|---|
-| 2xx | Yes | The operation happened. A retry must not repeat it |
+| 2xx | Yes, in the **same transaction** as the operation | The operation happened. A retry must not repeat it, so the record can't be allowed to lag behind the operation |
 | 4xx from validation or a business rule | Yes | The same request will always get the same answer. Replaying it is consistent and cheap |
 | **5xx** (bug, storage failure, security event) | **No**: the key's reservation is released | The failure was ours and may be temporary. If it were stored, a client retrying with the same key would get the same 500 forever, even after the problem is fixed |
 
 Requests rejected *before* the idempotency step (401, 403, 429, invalid JSON) never reserve a key.
+
+Error responses are stored (4xx) or released (5xx) after the failed transaction, in a write of their own. If that write is lost, nothing happened anyway: the reservation is reclaimed after 60 s and the retry gets the same answer by running again.
 
 ## 8.12 Testing the error paths
 

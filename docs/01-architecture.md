@@ -122,11 +122,10 @@ sequenceDiagram
     I->>DB: transact: reserve key (or replay stored response)
     H->>V: validate body (zod)
     V-->>H: typed input
-    H->>P: createPayment(merchant, input)
-    P->>DB: transact: payment (pending) + job + event + deliveries
+    H->>P: createPayment(merchant, input, storeResponse)
+    P->>DB: transact: payment (pending) + job + event + deliveries + stored response
     DB-->>P: committed (file written)
     P-->>H: payment
-    H->>I: store response for replay
     H-->>C: 202 Accepted + payment
 ```
 

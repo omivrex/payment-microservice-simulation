@@ -58,6 +58,15 @@ const immer = new Immer({ autoFreeze: false });
 /** Deep plain-JSON copy. Works on Immer drafts (unlike structuredClone). Records are JSON-safe by design. */
 export const plain = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
 
+/**
+ * Looks up a record by an id that may come from the client. Plain `map[id]` also finds inherited
+ * properties (`constructor`, `toString`, ...), which would be treated as a record.
+ */
+export const getOwn = <T>(map: Readonly<Record<string, T>>, id: string): T | undefined => (Object.hasOwn(map, id) ? map[id] : undefined);
+
+/** Extra writes a caller adds to a service's transaction, so they commit (or roll back) with it. */
+export type InTransaction<R> = (draft: MerchantData, result: R) => void;
+
 const RENAME_ATTEMPTS = 5;
 
 const isErrno = (err: unknown, ...codes: string[]): boolean =>
@@ -71,6 +80,12 @@ function isPidAlive(pid: number): boolean {
     return isErrno(err, 'EPERM'); // exists but owned by another user
   }
 }
+
+/**
+ * Lock files this process currently holds. A lock carrying our own PID that is not in here was left
+ * by an earlier process that had the same PID (common in containers, where the PID is often 1).
+ */
+const heldLocks = new Set<string>();
 
 export class JsonDb {
   readonly #file: string;
@@ -123,7 +138,7 @@ export class JsonDb {
       } else db.#checkSize(Buffer.byteLength(raw), true);
       return db;
     } catch (err) {
-      await opts.fileOps.unlink(`${file}.lock`).catch(() => {});
+      await JsonDb.#releaseLock(opts.fileOps, `${file}.lock`);
       throw err;
     }
   }
@@ -160,17 +175,24 @@ export class JsonDb {
         const handle = await ops.open(lockFile, 'wx', 0o600);
         await handle.writeFile(String(process.pid));
         await handle.close();
+        heldLocks.add(lockFile);
         return;
       } catch (err) {
         if (!isErrno(err, 'EEXIST')) throw new StartupError('Could not create database lock file', { cause: err });
         const pid = Number((await ops.readFile(lockFile).catch(() => '')).trim());
-        if (Number.isInteger(pid) && pid > 0 && isPidAlive(pid)) {
+        const ours = pid === process.pid;
+        if (Number.isInteger(pid) && pid > 0 && (ours ? heldLocks.has(lockFile) : isPidAlive(pid))) {
           throw new StartupError(`Database is locked by another running process (PID ${pid}); refusing to start`);
         }
         await ops.unlink(lockFile).catch(() => {}); // stale lock from a crashed process
       }
     }
     throw new StartupError('Could not acquire database lock');
+  }
+
+  static async #releaseLock(ops: FileOps, lockFile: string): Promise<void> {
+    heldLocks.delete(lockFile);
+    await ops.unlink(lockFile).catch(() => {});
   }
 
   // ---------------------------------------------------------------- reads
@@ -217,7 +239,7 @@ export class JsonDb {
     if (this.#closed) return;
     this.#closed = true;
     await this.#tail;
-    await this.#ops.unlink(this.#lockFile).catch(() => {});
+    await JsonDb.#releaseLock(this.#ops, this.#lockFile);
   }
 
   get fileSizeBytes(): number {

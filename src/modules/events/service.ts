@@ -1,4 +1,4 @@
-import type { JsonDb } from '../../db/jsonDb.js';
+import { getOwn, type JsonDb } from '../../db/jsonDb.js';
 import type { EventType, StoredEvent } from '../../db/schema.js';
 import { NotFoundError } from '../../errors.js';
 import { paginate, type Page } from '../../http/validate.js';
@@ -23,7 +23,7 @@ export class EventsService {
   }
 
   get(merchantId: string, id: string): EventView {
-    const event = this.db.read(merchantId, (d) => d.events[id]);
+    const event = this.db.read(merchantId, (d) => getOwn(d.events, id));
     if (!event) throw new NotFoundError('Event', id);
     return toEventView(event);
   }

@@ -334,7 +334,7 @@ interface WebhookDelivery {
 interface IdempotencyRecord {
   id: string;                     // `${merchantId}:${method}:${path}:${idempotencyKey}`
   merchantId: string;
-  requestHash: string;            // SHA-256 of the request body as canonical JSON (keys sorted)
+  requestHash: string;            // HMAC-SHA256 of the request body as canonical JSON (keys sorted)
   status: 'in_progress' | 'completed';
   responseStatus: number | null;
   responseBody: unknown | null;
@@ -345,6 +345,8 @@ interface IdempotencyRecord {
 
 **Why store the full response:** a retried request gets *exactly* the original response, including the original error, so clients can retry safely after a network timeout.
 **Why hash the body:** if the same key is reused with a *different* body, that's almost certainly a client bug. The service returns `422 idempotency_key_reused` instead of silently replaying a response for a different request.
+**Why a keyed hash (HMAC):** the body can contain a card number and CVC. A plain SHA-256 of it could be brute-forced from a copy of the file. The key is the `idempotency-request` sub-key of `HASHING_SECRET` (see [Security §4.4](04-security.md#the-hashing-secret)).
+**Why a successful response is stored in the action's transaction:** the record is completed in the same transaction that creates the payment, token or card, or queues the capture, refund or cancel. A crash or failed write can't leave the action committed with its record still `in_progress`, which a retry would treat as abandoned and run again (see [API §5.1](05-api.md#idempotency)).
 
 ## 2.5 What the API returns vs. what is stored
 

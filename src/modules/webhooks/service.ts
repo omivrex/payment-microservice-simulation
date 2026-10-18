@@ -1,7 +1,7 @@
 import { isoNow, type Clock } from '../../clock.js';
 import { aadFor, type Encryptor } from '../../crypto/encryption.js';
 import { randomSecret } from '../../crypto/hashing.js';
-import type { JsonDb } from '../../db/jsonDb.js';
+import { getOwn, type JsonDb } from '../../db/jsonDb.js';
 import type { EventType, MerchantData, WebhookDelivery, WebhookEndpoint } from '../../db/schema.js';
 import { ConflictError, NotFoundError, ValidationError } from '../../errors.js';
 import { newId } from '../../ids.js';
@@ -81,7 +81,7 @@ export class WebhooksService {
   }
 
   get(merchantId: string, id: string): WebhookEndpointView {
-    const endpoint = this.db.read(merchantId, (d) => d.webhookEndpoints[id]);
+    const endpoint = this.db.read(merchantId, (d) => getOwn(d.webhookEndpoints, id));
     if (!endpoint) throw new NotFoundError('Webhook endpoint', id);
     return toEndpointView(endpoint);
   }
@@ -134,7 +134,7 @@ export class WebhooksService {
 
   listDeliveries(merchantId: string, endpointId: string, query: { status?: WebhookDelivery['status'] | undefined; limit: number; offset: number }): Page<WebhookDeliveryView> {
     const { endpoint, deliveries } = this.db.read(merchantId, (d) => ({
-      endpoint: d.webhookEndpoints[endpointId],
+      endpoint: getOwn(d.webhookEndpoints, endpointId),
       deliveries: Object.values(d.webhookDeliveries).filter((x) => x.endpointId === endpointId && (query.status === undefined || x.status === query.status)),
     }));
     if (!endpoint) throw new NotFoundError('Webhook endpoint', endpointId);
@@ -169,7 +169,7 @@ function assertUrlNotRegistered(d: MerchantData, url: string, exceptId: string |
 }
 
 function findEndpoint(d: MerchantData, id: string): WebhookEndpoint {
-  const endpoint = d.webhookEndpoints[id];
+  const endpoint = getOwn(d.webhookEndpoints, id);
   if (!endpoint) throw new NotFoundError('Webhook endpoint', id);
   return endpoint;
 }

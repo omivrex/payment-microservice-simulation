@@ -14,7 +14,9 @@ import {
   secretKeyAuth,
   type OpenApiModule,
 } from '../../http/openapi.js';
+import { storeResponse } from '../../http/middleware/idempotency.js';
 import type { RouteDeps } from '../../http/routeDeps.js';
+import type { SaveCardResult } from './service.js';
 import { paginationQuery, parseBody, parseQuery } from '../../http/validate.js';
 import { cardInputSchema, customerIdSchema } from './cardInput.js';
 
@@ -39,7 +41,8 @@ export function cardsRouter({ services, auth, idempotency }: RouteDeps): Router 
     const body = parseBody(saveCardSchema, req.body);
     const customerId = body.customerId ?? null;
     const input = body.token !== undefined ? { token: body.token, customerId } : { card: body.card!, customerId };
-    const { card, created } = await services.cards.save(req.auth!.merchantId, input);
+    const stored = storeResponse<SaveCardResult>(req, (r) => (r.created ? 201 : 200), (r) => r.card);
+    const { card, created } = await services.cards.save(req.auth!.merchantId, input, stored);
     res.status(created ? 201 : 200).json(card);
   });
 
