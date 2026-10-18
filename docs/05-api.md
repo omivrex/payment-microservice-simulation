@@ -355,7 +355,15 @@ Request:
 { "url": "https://acme.test/webhooks/payments", "events": ["*"], "description": "All events" }
 ```
 
-Response `201`: the endpoint plus **`"secret": "whsec_…"`, shown only this once**.
+Response `201`: the endpoint plus **`"secret": "whsec_…"`, shown only this once**. Store it where your receiver can read it. If it's lost, call `rotate-secret`.
+
+Local development example, using the receiver script from the README walkthrough (it listens on `http://localhost:4000/webhooks/payments` by default; the path is your choice). The service must be started with `WEBHOOK_ALLOW_INSECURE_URLS=true`, or `http://` and `localhost` URLs are rejected with `400`:
+
+```json
+{ "url": "http://localhost:4000/webhooks/payments", "events": ["*"] }
+```
+
+**The URL must be the exact address your receiver handles, path included.** The service POSTs to exactly this URL. A receiver that doesn't handle the path answers `404`, and the delivery log (`GET /webhooks/{id}/deliveries`) shows `lastResponseStatus: 404`. Step-by-step setup and troubleshooting: [Webhooks §6.6](06-webhooks.md#66-receiving-and-verifying-webhooks).
 
 Validation: URL rules in [Security §4.8](04-security.md#48-ssrf-protection-for-webhook-urls); `events` is `["*"]` or a non-empty list of known event types; at most **10 endpoints per merchant** (an 11th → `409 conflict`).
 

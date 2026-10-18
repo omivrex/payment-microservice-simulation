@@ -213,7 +213,7 @@ Webhook-Signature: t=1760520600,v1=5257a869e7…
 | One secret per endpoint | Leaking one receiver's secret doesn't affect the others |
 | Secret rotation is immediate | Same reasoning as API keys. Deliveries signed with the new secret fail on the receiver until it's updated |
 
-A verification example is in [Webhooks](06-webhooks.md#66-verifying-signatures).
+A verification example is in [Webhooks](06-webhooks.md#66-receiving-and-verifying-webhooks).
 
 ## 4.8 SSRF protection for webhook URLs
 
@@ -232,7 +232,7 @@ Rules, checked when an endpoint is **registered** and again **before every deliv
 |---|---|
 | Check again at delivery time, **inside the HTTP client's DNS lookup** | DNS can change after registration (*DNS rebinding*). Checking inside the lookup means the address that was checked is exactly the address that gets connected to. A separate "check, then connect" step would leave a window in which DNS could change again |
 | Don't follow redirects | A public URL could redirect to an internal one, bypassing rule 2 |
-| `WEBHOOK_ALLOW_INSECURE_URLS=true` to relax rules 1–2 | Local development needs `http://localhost:4000/webhooks`. It's an explicit opt-in, so it can't be turned on by accident |
+| `WEBHOOK_ALLOW_INSECURE_URLS=true` to relax rules 1–2 | Local development needs `http://localhost:4000/webhooks/payments` (see [Webhooks §6.6](06-webhooks.md#66-receiving-and-verifying-webhooks)). It's an explicit opt-in, so it can't be turned on by accident |
 
 ## 4.9 Rate limiting
 
@@ -362,5 +362,5 @@ The service listens on plain HTTP and expects a **reverse proxy** (nginx, Caddy,
 
 | Test | Checks | Edge case guarded |
 |---|---|---|
-| The [§6.6 verification example](06-webhooks.md#66-verifying-signatures) accepts our own signed delivery | Signer and verifier agree | Docs showing code that doesn't work |
+| The [§6.6 verification example](06-webhooks.md#66-receiving-and-verifying-webhooks) accepts our own signed delivery | Signer and verifier agree | Docs showing code that doesn't work |
 | Body changed by one byte, wrong secret, timestamp 301 s old, missing `v1` → rejected | Each verification step | Forged or replayed webhooks being accepted |

@@ -53,7 +53,12 @@ What each smoke scenario covers (happy paths and the edge cases it attacks) is l
 
 ## Manual walkthrough (curl)
 
-Start the server with `WEBHOOK_ALLOW_INSECURE_URLS=true` and `PROCESSOR_LATENCY_MS=300`, then:
+**Before you start:** add these two lines to `.env`, then start the server with `yarn dev`.
+
+```bash
+WEBHOOK_ALLOW_INSECURE_URLS=true   # lets you register http://localhost webhook URLs (local development only)
+PROCESSOR_LATENCY_MS=300
+```
 
 **1. Sign up** (no key needed) and save the keys:
 
@@ -64,18 +69,48 @@ export SK=sk_test_...   # apiKeys.secret
 export PK=pk_test_...   # apiKeys.publishable
 ```
 
-**2. Start a webhook receiver** in another terminal. It prints whatever it receives:
+**2. Start a webhook receiver and register its URL.**
 
+**a) Start the receiver** in a second terminal. It's a small script that prints every event it receives:
+
+<!-- webhook-receiver -->
 ```bash
-node -e "require('http').createServer((q,s)=>{let b='';q.on('data',c=>b+=c);q.on('end',()=>{console.log(q.headers['webhook-event'],b);s.end()})}).listen(4000)"
+node -e '
+const http = require("http");
+const port = process.env.PORT || 4000;
+const path = process.env.WEBHOOK_PATH || "/webhooks/payments";
+const server = http.createServer((req, res) => {
+  let body = "";
+  req.on("data", (chunk) => (body += chunk));
+  req.on("end", () => {
+    const { pathname } = new URL(req.url, "http://localhost");
+    if (req.method !== "POST" || pathname !== path) {
+      console.log(`404: got ${req.method} ${pathname}, but this receiver only accepts POST ${path}`);
+      return res.writeHead(404).end();
+    }
+    const event = JSON.parse(body);
+    console.log(`${event.type}  ${event.data.object.id}  status=${event.data.object.status}`);
+    res.writeHead(200).end("ok");
+  });
+});
+server.listen(port, () => console.log(`Receiver listening on http://localhost:${server.address().port}${path}`));
+'
 ```
 
-Register it, and keep the `secret` from the response for verifying signatures:
+It prints `Receiver listening on http://localhost:4000/webhooks/payments`. **That printed URL is the one to register.**
+
+The path and port are your choice. To use a different path, set it before `node`, for example `WEBHOOK_PATH=/api/pms/payment PORT=5000 node -e '…'`. The receiver then prints `http://localhost:5000/api/pms/payment`. If port 4000 is taken (`EADDRINUSE`), pick another one with `PORT`.
+
+**b) Register the URL** the receiver printed:
 
 ```bash
 curl -s -X POST localhost:3000/webhooks -H "authorization: Bearer $SK" -H 'content-type: application/json' \
-  -d '{"url":"http://localhost:4000/hook","events":["*"]}'
+  -d '{"url":"http://localhost:4000/webhooks/payments","events":["*"]}'
 ```
+
+**The registered URL must match the receiver's path exactly.** The service POSTs to exactly the URL you register. If the paths differ, the receiver answers `404` and prints the path it actually received. To fix a mismatch, `PATCH /webhooks/{id}` with the right `url`.
+
+From the response, keep `id` (`we_…`), which you'll need for the delivery log, and `secret` (`whsec_…`), which is **shown only once** and is needed to verify signatures (see [Verifying webhooks](#verifying-webhooks)). More detail and a troubleshooting table: [docs/06-webhooks.md §6.6](docs/06-webhooks.md#66-receiving-and-verifying-webhooks).
 
 **3. Tokenize a card** with the *publishable* key, which is what a browser would do:
 
@@ -91,7 +126,13 @@ curl -s -X POST localhost:3000/payments -H "authorization: Bearer $SK" -H 'conte
   -H 'Idempotency-Key: order-1' -d '{"amount":2500,"currency":"usd","token":"tok_..."}'
 ```
 
-Within about a second the receiver prints `payment.created`, `payment.authorized` and `payment.captured`. Then poll the payment:
+Within about a second the receiver prints `payment.created`, `payment.authorized` and `payment.captured` lines. If nothing arrives, check the delivery log: its `lastResponseStatus` and `lastError` say why (see the troubleshooting table in [§6.6](docs/06-webhooks.md#66-receiving-and-verifying-webhooks)):
+
+```bash
+curl -s localhost:3000/webhooks/we_.../deliveries -H "authorization: Bearer $SK"
+```
+
+Poll the payment:
 
 ```bash
 curl -s localhost:3000/payments/pay_... -H "authorization: Bearer $SK"
@@ -126,7 +167,7 @@ curl -s -X POST localhost:3000/payments/pay_.../refund -H "authorization: Bearer
 
 ## Verifying webhooks
 
-Use the endpoint's `whsec_` secret (no API key needed). See [docs/06-webhooks.md §6.6](docs/06-webhooks.md#66-verifying-signatures) for a complete receiver.
+The receiver above only prints events. A real receiver must also verify the `Webhook-Signature` header using the endpoint's `whsec_` secret (no API key needed). [docs/06-webhooks.md §6.6](docs/06-webhooks.md#66-receiving-and-verifying-webhooks) has the verification code and a complete Express receiver.
 
 ## Logs
 
