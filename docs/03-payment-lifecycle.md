@@ -157,7 +157,9 @@ flowchart TD
 | Decision | Why |
 |---|---|
 | **Claim and apply in separate transactions; processor call outside both** | A transaction blocks every other write (see [Persistence](07-persistence.md#isolation)). Holding one open during a 300 ms processor call would stall the whole API |
-| **Lease of 30 s** | If the process dies mid-job, the job becomes claimable again after 30 s. Nothing gets stuck forever |
+| **Time limit on every processor call** (`PROCESSOR_TIMEOUT_MS`, default 10 s) | Without it, a processor that never answers holds its concurrency slot forever. Once every slot is held, the worker stops processing **all** payments, and the hung jobs are never retried. This was confirmed with a hung-processor test before the limit existed. At the limit, the call is aborted (through an `AbortSignal`) and treated as a **transient error**: the slot is freed, the job is requeued with backoff, and a later answer to the abandoned call is ignored. This works even if a processor ignores the signal. Retries reuse the job ID as the idempotency reference, so a gateway that did act before the timeout recognises the repeat |
+| **Lease of 30 s, longer than the time limit** | If the process dies mid-job, the job becomes claimable again after 30 s, so nothing gets stuck forever. Because the time limit (max 25 s) is shorter than the lease, a run in a healthy process always finishes, or times out, before its lease can expire. An expired lease then reliably means the process died |
+| **No reclaim after the final attempt** | A reclaim counts as an attempt. A job whose lease expires on its last allowed attempt (`attempts = maxAttempts`, 5) is **given up** instead of reclaimed: an authorization fails, and a capture/refund/cancel is reverted, exactly as when retries run out (table below). Without this, a job whose runs keep dying (for example, one that crashes the process) would be reclaimed forever. This check runs **before** the free-slot check, so it still happens when every slot is busy |
 | **Check ownership when applying** | The apply step checks that the job is still `running` with the same `attempts` number. If the lease expired and another run took over, the stale result is thrown away, so a transition is never applied twice |
 | **Declines count as job success** | A decline is a valid *answer* from the processor, not a failure to get one, so retrying wouldn't change it. Only **transient** errors are retried |
 | **Concurrency limit (default 5)** | Bounds memory use and the number of simultaneous processor calls |
@@ -181,7 +183,9 @@ That's exponential backoff, `2^(attempt-1)` seconds, with up to 5 attempts in ab
 | Job type | Payment ends up | Event |
 |---|---|---|
 | authorize | `failed` with `failure.code = "processing_error"` | `payment.failed` |
-| capture / refund / cancel | Back to `pendingAction.previousStatus` | `payment.action_failed` (includes which action failed and why) |
+| capture / refund / cancel | Back to `pendingAction.previousStatus` | `payment.action_failed` (includes which action failed and why, e.g. `processor_timeout`) |
+
+"Retries run out" covers both cases: the 5th attempt fails or times out, **or** the 5th attempt never reports back at all, because its lease expired (the job's `lastError` is then "lease expired on the final attempt").
 
 **Why revert instead of failing the payment:** a failed *refund* doesn't change the fact that the money was captured. Marking the payment `failed` would misrepresent where the money is. Reverting tells the truth: the action didn't happen, and the merchant can try again.
 
@@ -224,12 +228,13 @@ Any card number that passes the Luhn check and isn't listed below is **approved*
 ```ts
 interface Processor {
   authorize(input: { reference: string; cardNumber: string; expMonth: number; expYear: number;
-                     amountMinor: number; currency: string }): Promise<ProcessorResult<{ authorizationCode: string }>>;
-  capture(input: { reference: string; authorizationCode: string; amountMinor: number }): Promise<ProcessorResult>;
-  refund(input:  { reference: string; authorizationCode: string; amountMinor: number }): Promise<ProcessorResult>;
-  cancel(input:  { reference: string; authorizationCode: string }): Promise<ProcessorResult>;
+                     amountMinor: number; currency: string; signal?: AbortSignal }): Promise<ProcessorResult<{ authorizationCode: string }>>;
+  capture(input: { reference: string; authorizationCode: string; amountMinor: number; signal?: AbortSignal }): Promise<ProcessorResult>;
+  refund(input:  { reference: string; authorizationCode: string; amountMinor: number; signal?: AbortSignal }): Promise<ProcessorResult>;
+  cancel(input:  { reference: string; authorizationCode: string; signal?: AbortSignal }): Promise<ProcessorResult>;
 }
 
+// `signal` is aborted when the worker's time limit is reached; an implementation should stop waiting then.
 type ProcessorResult<T = {}> =
   | ({ outcome: 'success' } & T)
   | { outcome: 'declined'; code: string; message: string }    // permanent
@@ -300,6 +305,12 @@ Worker tests use the fake clock, `tickOnce()` and the scripted processor describ
 | Capture fails permanently → back to `authorized`, `payment.action_failed` | Revert, not fail | Marking captured money as failed |
 | Refund fails permanently from `partially_refunded` → back to `partially_refunded` | `previousStatus` restored precisely | Reverting to the wrong status |
 | Job claimed, run never finishes; clock +31 s → job reclaimed and completed. The first run's late result is **discarded** | Lease + ownership check | A stuck job, or the same transition applied twice |
+| Processor call that never answers (and ignores the abort signal) → abandoned at `PROCESSOR_TIMEOUT_MS`: job requeued with `processor_timeout`, lease released, slot freed, **other payments still processed** | Time limit | One hung processor call freezing the whole worker |
+| Database writes (create, `PATCH`) while processor calls hang → succeed immediately | Processor calls run outside transactions | A hung processor locking the database |
+| After a timeout, the job is retried after its backoff and can succeed | Retries are not refused | Hung jobs never retried |
+| Every attempt times out → exactly 5 calls, then authorize `failed` / capture reverted with `payment.action_failed` (`processor_timeout`) | Giving up at `maxAttempts` | Retrying forever |
+| Lease expired on the **final** attempt (`attempts = 5`) while all slots are busy → given up (`lastError` "lease expired on the final attempt"), never reclaimed or re-sent; a capture is reverted, not left `capturing` | No reclaim beyond `maxAttempts` | A job whose runs keep dying being reclaimed forever |
+| The abandoned call answers late → ignored, the transition is applied once | Ownership check after a timeout | Double transitions |
 | Queued jobs in the DB file at startup → processed after restart | Durability | Work lost across restarts |
 
 ### Card handling

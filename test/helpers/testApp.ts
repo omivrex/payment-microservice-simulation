@@ -87,6 +87,7 @@ export async function startTestApp(
   };
   const settle = async (maxPasses = 20) => {
     for (let i = 0; i < maxPasses; i++) {
+      await worker.whenIdle(); // runs still in flight aren't "due", but their results aren't applied yet
       const now = clock.now().toISOString();
       const due = db.scanMerchants((_m, d) =>
         Object.values(d.jobs).filter((j) => (j.status === 'queued' && j.runAt <= now) || (j.status === 'running' && (j.lockedUntil ?? '') < now)),

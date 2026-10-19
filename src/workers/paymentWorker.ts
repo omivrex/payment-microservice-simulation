@@ -17,6 +17,7 @@ import { createPollingLoop, type BackgroundLoop } from './background.js';
  */
 
 export const WORKER_INTERVAL_MS = 500;
+/** Claim lease. Must exceed PROCESSOR_TIMEOUT_MS (max 25 s), so a run always ends before its lease can expire. */
 export const LEASE_MS = 30_000;
 
 interface Claimed {
@@ -29,33 +30,69 @@ interface Claimed {
 type Outcome =
   | { kind: 'success'; authorizationCode?: string }
   | { kind: 'declined'; code: string; message: string }
-  | { kind: 'transient'; code: string; message: string; bug?: unknown }
+  | { kind: 'transient'; code: string; message: string; bug?: unknown; timedOut?: boolean }
   | { kind: 'permanent'; code: string; message: string; security?: boolean; err?: unknown };
 
+const GENERIC_FAILURE = { code: 'processing_error', message: 'The payment could not be processed.' };
+
 export const retryDelayMs = (attemptsMade: number): number => 2 ** attemptsMade * 1000;
+
+class ProcessorTimeoutError extends Error {
+  constructor(readonly timeoutMs: number) {
+    super(`Processor did not respond within ${timeoutMs} ms`);
+    this.name = 'ProcessorTimeoutError';
+  }
+}
 
 export function createPaymentWorker(ctx: AppContext, services: Services, processor: Processor): BackgroundLoop {
   const { db, clock } = ctx;
   const inFlight = new Set<Promise<void>>();
   const log = ctx.logger.child({ loop: 'payment-worker' });
+  const timeoutMs = ctx.config.processorTimeoutMs;
 
+  const leaseExpired = (job: Job, now: string) => job.status === 'running' && job.lockedUntil !== null && job.lockedUntil < now;
+  /** Claimable: queued and due, or a run whose lease expired with attempts left. */
   const isDue = (job: Job, now: string): boolean =>
-    (job.status === 'queued' && job.runAt <= now) || (job.status === 'running' && job.lockedUntil !== null && job.lockedUntil < now);
+    (job.status === 'queued' && job.runAt <= now) || (leaseExpired(job, now) && job.attempts < job.maxAttempts);
+  /** The final allowed attempt never reported back (process died, or the run hung): give up instead of reclaiming. */
+  const isAbandonedOnLastAttempt = (job: Job, now: string): boolean => leaseExpired(job, now) && job.attempts >= job.maxAttempts;
+
+  const groupByMerchant = (rows: Array<{ merchantId: string; id: string }>) => {
+    const byMerchant = new Map<string, string[]>();
+    for (const { merchantId, id } of rows) byMerchant.set(merchantId, [...(byMerchant.get(merchantId) ?? []), id]);
+    return byMerchant;
+  };
 
   async function tick(): Promise<void> {
+    const now = isoNow(clock);
+
+    // Give up on exhausted jobs first: it needs no free slot, so it happens even when every slot is busy.
+    const abandoned = db.scanMerchants((merchantId, d) =>
+      Object.values(d.jobs).filter((j) => isAbandonedOnLastAttempt(j, now)).map((j) => ({ merchantId, id: j.id })),
+    );
+    for (const [merchantId, ids] of groupByMerchant(abandoned)) {
+      const failed = await db.transact(merchantId, (d) => {
+        const out: Array<{ jobId: string; paymentId: string; jobType: string; attempts: number }> = [];
+        for (const id of ids) {
+          const job = d.jobs[id];
+          if (!job || !isAbandonedOnLastAttempt(job, now)) continue;
+          failJob(d, merchantId, job, d.payments[job.paymentId], { code: 'processing_error', message: 'The action could not be completed.' }, 'lease expired on the final attempt', now);
+          out.push({ jobId: job.id, paymentId: job.paymentId, jobType: job.type, attempts: job.attempts });
+        }
+        return out;
+      });
+      for (const f of failed) log.error('job failed permanently: no result after the final attempt (lease expired)', { merchantId, ...f });
+    }
+
     const free = ctx.config.workerConcurrency - inFlight.size;
     if (free <= 0) return;
-    const now = isoNow(clock);
     const due = db
       .scanMerchants((merchantId, d) => Object.values(d.jobs).filter((j) => isDue(j, now)).map((j) => ({ merchantId, id: j.id, runAt: j.runAt })))
       .sort((a, b) => (a.runAt < b.runAt ? -1 : a.runAt > b.runAt ? 1 : 0))
       .slice(0, free);
 
     // One claim transaction per merchant (transactions never span scopes).
-    const byMerchant = new Map<string, string[]>();
-    for (const { merchantId, id } of due) byMerchant.set(merchantId, [...(byMerchant.get(merchantId) ?? []), id]);
-
-    for (const [merchantId, ids] of byMerchant) {
+    for (const [merchantId, ids] of groupByMerchant(due)) {
       const claimed = await db.transact(merchantId, (d) => {
         const out: Claimed[] = [];
         for (const id of ids) {
@@ -82,19 +119,22 @@ export function createPaymentWorker(ctx: AppContext, services: Services, process
     const jobLog = log.child({ jobId: c.job.id, jobType: c.job.type, paymentId: c.payment.id, merchantId: c.merchantId, attempt: c.job.attempts, requestId: c.job.requestId ?? undefined });
     let outcome: Outcome;
     try {
-      outcome = fromResult(await callProcessor(c));
+      outcome = fromResult(await callWithTimeout(c));
     } catch (err) {
-      if (err instanceof SecurityError) {
-        outcome = { kind: 'permanent', code: 'processing_error', message: 'The payment could not be processed.', security: true, err };
+      if (err instanceof ProcessorTimeoutError) {
+        outcome = { kind: 'transient', code: 'processor_timeout', message: 'The processor did not respond in time.', timedOut: true };
+      } else if (err instanceof SecurityError) {
+        outcome = { kind: 'permanent', ...GENERIC_FAILURE, security: true, err };
       } else if (err instanceof CardUnavailableError) {
-        outcome = { kind: 'permanent', code: 'processing_error', message: 'The payment could not be processed.', err };
+        outcome = { kind: 'permanent', ...GENERIC_FAILURE, err };
       } else {
-        outcome = { kind: 'transient', code: 'processing_error', message: 'The payment could not be processed.', bug: err };
+        outcome = { kind: 'transient', ...GENERIC_FAILURE, bug: err };
       }
     }
 
     if (outcome.kind === 'transient') {
       if (outcome.bug !== undefined) jobLog.error('job handler crashed', { err: outcome.bug });
+      else if (outcome.timedOut) jobLog.warn('processor call timed out', { timeoutMs });
       else jobLog.warn('processor transient error', { code: outcome.code });
     } else if (outcome.kind === 'permanent') {
       jobLog.error('job failed permanently', { code: outcome.code, err: outcome.err, ...(outcome.security ? { security: true } : {}) });
@@ -106,22 +146,46 @@ export function createPaymentWorker(ctx: AppContext, services: Services, process
       else if (applied === 'gave_up') jobLog.error('job failed permanently after retries', { code: outcome.kind === 'transient' ? outcome.code : undefined });
       else jobLog.info('job processed', { result: applied });
     } catch (err) {
-      // e.g. storage failure: the lease will expire and the job will be retried.
+      // e.g. storage failure: the lease will expire and the job will be retried (or given up at maxAttempts).
       jobLog.error('could not apply job result', { err });
     }
   }
 
-  async function callProcessor(c: Claimed): Promise<ProcessorResult<{ authorizationCode?: string }>> {
+  /**
+   * Bounded processor call (PROCESSOR_TIMEOUT_MS). On timeout the call is aborted through its AbortSignal and
+   * treated as a transient error, so the job is retried with backoff and its concurrency slot is freed, even if
+   * the processor ignores the signal. Retries reuse the job ID as the idempotency reference, so a gateway that
+   * did act before the timeout recognises the repeat.
+   */
+  async function callWithTimeout(c: Claimed): Promise<ProcessorResult<{ authorizationCode?: string }>> {
+    const controller = new AbortController();
+    let timer: NodeJS.Timeout | undefined;
+    const call = callProcessor(c, controller.signal);
+    call.catch(() => {}); // a late failure after the timeout must not become an unhandled rejection
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => {
+        controller.abort();
+        reject(new ProcessorTimeoutError(timeoutMs));
+      }, timeoutMs);
+    });
+    try {
+      return await Promise.race([call, timeout]);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  async function callProcessor(c: Claimed, signal: AbortSignal): Promise<ProcessorResult<{ authorizationCode?: string }>> {
     const reference = c.job.id;
     if (c.job.type === 'authorize') {
       if (!c.card || !c.card.numberEncrypted) throw new CardUnavailableError();
       const cardNumber = services.vault.decryptNumber(c.card);
-      return processor.authorize({ reference, cardNumber, expMonth: c.card.expMonth, expYear: c.card.expYear, amountMinor: c.payment.amountMinor, currency: c.payment.currency });
+      return processor.authorize({ reference, cardNumber, expMonth: c.card.expMonth, expYear: c.card.expYear, amountMinor: c.payment.amountMinor, currency: c.payment.currency, signal });
     }
     const authorizationCode = c.payment.authorizationCode ?? '';
-    if (c.job.type === 'capture') return processor.capture({ reference, authorizationCode, amountMinor: c.job.amountMinor ?? c.payment.amountMinor });
-    if (c.job.type === 'refund') return processor.refund({ reference, authorizationCode, amountMinor: c.job.amountMinor ?? 0 });
-    return processor.cancel({ reference, authorizationCode });
+    if (c.job.type === 'capture') return processor.capture({ reference, authorizationCode, amountMinor: c.job.amountMinor ?? c.payment.amountMinor, signal });
+    if (c.job.type === 'refund') return processor.refund({ reference, authorizationCode, amountMinor: c.job.amountMinor ?? 0, signal });
+    return processor.cancel({ reference, authorizationCode, signal });
   }
 
   /** Applies an outcome. Returns false if this run no longer owns the job (stale result). */
@@ -131,20 +195,17 @@ export function createPaymentWorker(ctx: AppContext, services: Services, process
     const p = d.payments[c.payment.id];
     if (!job || job.status !== 'running' || job.attempts !== c.job.attempts || job.lockedUntil !== c.job.lockedUntil || !p) return false;
 
-    const finishJob = (status: 'succeeded' | 'failed', lastError: string | null = null) =>
-      Object.assign(job, { status, lastError, lockedUntil: null, completedAt: now, updatedAt: now });
-
     if (outcome.kind === 'transient' && job.attempts < job.maxAttempts) {
       Object.assign(job, { status: 'queued', runAt: addMs(now, retryDelayMs(job.attempts)), lockedUntil: null, lastError: outcome.code, updatedAt: now });
       return 'retry';
     }
 
-    const touch = () => (p.updatedAt = now);
-    const emit = (type: Parameters<typeof recordEvent>[2], extra?: Parameters<typeof recordEvent>[5]) =>
-      recordEvent(d, c.merchantId, type, toPaymentView(p) as never, now, extra);
+    const emit = (type: Parameters<typeof recordEvent>[2]) => recordEvent(d, c.merchantId, type, toPaymentView(p) as never, now);
+    const finishJob = (status: 'succeeded' | 'failed', lastError: string | null = null) =>
+      Object.assign(job, { status, lastError, lockedUntil: null, completedAt: now, updatedAt: now });
 
-    if (job.type === 'authorize') {
-      if (outcome.kind === 'success') {
+    if (outcome.kind === 'success') {
+      if (job.type === 'authorize') {
         p.authorizationCode = outcome.authorizationCode ?? null;
         p.history.push({ type: 'authorized', at: now, amountMinor: p.amountMinor });
         settleCardAfterAuthorization(d, p, true);
@@ -157,65 +218,70 @@ export function createPaymentWorker(ctx: AppContext, services: Services, process
           p.status = 'authorized';
           p.pendingAction = null;
         }
-        touch();
+        p.updatedAt = now;
         emit('payment.authorized');
-        finishJob('succeeded');
-        return 'success';
-      }
-      // Declined, permanently failed, or out of retries.
-      const failure = outcome.kind === 'declined' ? outcome : { code: 'processing_error', message: 'The payment could not be processed.' };
-      p.status = 'failed';
-      p.failure = { code: failure.code, message: failure.message };
-      p.pendingAction = null;
-      p.history.push({ type: 'failed', at: now, code: failure.code });
-      settleCardAfterAuthorization(d, p, false);
-      touch();
-      emit('payment.failed');
-      if (outcome.kind === 'declined') {
-        finishJob('succeeded');
-        return 'declined';
-      }
-      finishJob('failed', failure.code);
-      return outcome.kind === 'transient' ? 'gave_up' : 'failed';
-    }
-
-    // capture / refund / cancel
-    if (outcome.kind === 'success') {
-      const amount = job.amountMinor ?? 0;
-      if (job.type === 'capture') {
-        p.status = 'captured';
-        p.amountCapturedMinor = amount;
-        p.history.push({ type: 'captured', at: now, amountMinor: amount });
-        p.pendingAction = null;
-        touch();
-        emit('payment.captured');
-      } else if (job.type === 'refund') {
-        p.amountRefundedMinor += amount;
-        p.status = p.amountRefundedMinor >= p.amountCapturedMinor ? 'refunded' : 'partially_refunded';
-        p.history.push({ type: 'refunded', at: now, amountMinor: amount });
-        p.pendingAction = null;
-        touch();
-        emit(p.status === 'refunded' ? 'payment.refunded' : 'payment.partially_refunded');
       } else {
-        p.status = 'cancelled';
-        p.history.push({ type: 'cancelled', at: now });
+        const amount = job.amountMinor ?? 0;
+        if (job.type === 'capture') {
+          p.status = 'captured';
+          p.amountCapturedMinor = amount;
+          p.history.push({ type: 'captured', at: now, amountMinor: amount });
+        } else if (job.type === 'refund') {
+          p.amountRefundedMinor += amount;
+          p.status = p.amountRefundedMinor >= p.amountCapturedMinor ? 'refunded' : 'partially_refunded';
+          p.history.push({ type: 'refunded', at: now, amountMinor: amount });
+        } else {
+          p.status = 'cancelled';
+          p.history.push({ type: 'cancelled', at: now });
+        }
         p.pendingAction = null;
-        touch();
-        emit('payment.cancelled');
+        p.updatedAt = now;
+        emit(job.type === 'capture' ? 'payment.captured' : job.type === 'cancel' ? 'payment.cancelled' : p.status === 'refunded' ? 'payment.refunded' : 'payment.partially_refunded');
       }
       finishJob('succeeded');
       return 'success';
     }
 
-    // The action didn't happen: revert to where the payment was (§3.4 "When retries run out").
-    const reason = { code: outcome.code, message: outcome.message };
+    if (outcome.kind === 'declined' && job.type === 'authorize') {
+      // A decline is a valid answer, not a failure to get one: the job succeeded, the payment failed.
+      failJob(d, c.merchantId, job, p, { code: outcome.code, message: outcome.message }, null, now);
+      finishJob('succeeded');
+      return 'declined';
+    }
+
+    // Permanent failure, or out of retries.
+    failJob(d, c.merchantId, job, p, { code: outcome.code, message: outcome.message }, outcome.code, now);
+    return outcome.kind === 'transient' ? 'gave_up' : 'failed';
+  }
+
+  /**
+   * The single "give up" path, shared by: permanent failures, running out of retries, and a lease expiring on the
+   * final attempt. An authorization fails the payment (declines keep their code; anything else becomes a generic
+   * processing_error, so the merchant learns nothing about internals); a capture/refund/cancel reverts the
+   * payment to where it was (§3.4 "When retries run out").
+   */
+  function failJob(d: MerchantData, merchantId: string, job: Job, p: Payment | undefined, reason: { code: string; message: string }, jobError: string | null, now: string): void {
+    Object.assign(job, { status: 'failed', lastError: jobError ?? reason.code, lockedUntil: null, completedAt: now, updatedAt: now });
+    if (!p) return;
+    const emit = (type: Parameters<typeof recordEvent>[2], extra?: Parameters<typeof recordEvent>[5]) =>
+      recordEvent(d, merchantId, type, toPaymentView(p) as never, now, extra);
+
+    if (job.type === 'authorize') {
+      const failure = jobError === null ? reason : GENERIC_FAILURE;
+      p.status = 'failed';
+      p.failure = { code: failure.code, message: failure.message };
+      p.pendingAction = null;
+      p.history.push({ type: 'failed', at: now, code: failure.code });
+      settleCardAfterAuthorization(d, p, false);
+      p.updatedAt = now;
+      emit('payment.failed');
+      return;
+    }
     p.status = p.pendingAction?.previousStatus ?? p.status;
     p.pendingAction = null;
     p.history.push({ type: `${job.type}_failed`, at: now, code: reason.code });
-    touch();
+    p.updatedAt = now;
     emit('payment.action_failed', { action: { type: job.type, code: reason.code, message: reason.message } });
-    finishJob('failed', reason.code);
-    return outcome.kind === 'transient' ? 'gave_up' : 'failed';
   }
 
   /** After authorization: save the card (approved + saveCard) or purge an unsaved card's number (§3.3). */

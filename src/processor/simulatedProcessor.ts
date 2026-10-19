@@ -17,12 +17,22 @@ const TRANSIENT = { outcome: 'error' as const, code: 'processing_error', message
 
 export function createSimulatedProcessor(options: { latencyMs: number; failureRate: number; clock: Clock; random?: () => number }): Processor {
   const random = options.random ?? Math.random;
-  const delay = () => (options.latencyMs > 0 ? new Promise((r) => setTimeout(r, options.latencyMs)) : Promise.resolve());
+  /** Simulated network latency. Stops early (rejects) if the worker's time limit aborts the call. */
+  const delay = (signal?: AbortSignal) =>
+    new Promise<void>((resolve, reject) => {
+      if (signal?.aborted) return reject(signal.reason);
+      if (options.latencyMs <= 0) return resolve();
+      const timer = setTimeout(resolve, options.latencyMs);
+      signal?.addEventListener('abort', () => {
+        clearTimeout(timer);
+        reject(signal.reason);
+      }, { once: true });
+    });
   const randomFailure = (): ProcessorResult | null => (random() < options.failureRate ? TRANSIENT : null);
 
   return {
     async authorize(input) {
-      await delay();
+      await delay(input.signal);
       const failure = randomFailure();
       if (failure) return failure as ProcessorResult<{ authorizationCode: string }>;
       const scripted = TEST_CARD_OUTCOMES[input.cardNumber];
@@ -30,16 +40,16 @@ export function createSimulatedProcessor(options: { latencyMs: number; failureRa
       if (isExpired(input.expMonth, input.expYear, options.clock.now())) return { ...EXPIRED };
       return { outcome: 'success', authorizationCode: randomBytes(3).toString('hex').toUpperCase() };
     },
-    async capture() {
-      await delay();
+    async capture(input) {
+      await delay(input.signal);
       return randomFailure() ?? { outcome: 'success' };
     },
-    async refund() {
-      await delay();
+    async refund(input) {
+      await delay(input.signal);
       return randomFailure() ?? { outcome: 'success' };
     },
-    async cancel() {
-      await delay();
+    async cancel(input) {
+      await delay(input.signal);
       return randomFailure() ?? { outcome: 'success' };
     },
   };

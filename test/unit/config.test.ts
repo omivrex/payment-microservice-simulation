@@ -19,6 +19,7 @@ describe('§1.9 configuration', () => {
     assert.equal(c.dbFile, 'data/db.json');
     assert.equal(c.processorLatencyMs, 300);
     assert.equal(c.processorFailureRate, 0);
+    assert.equal(c.processorTimeoutMs, 10_000);
     assert.equal(c.workerConcurrency, 5);
     assert.equal(c.webhookAllowInsecureUrls, false);
     assert.equal(c.retentionDays, 7);
@@ -59,6 +60,8 @@ describe('§1.9 configuration', () => {
     fails(testEnv({ WORKER_CONCURRENCY: '0' }), /WORKER_CONCURRENCY/);
     fails(testEnv({ PROCESSOR_FAILURE_RATE: '1.5' }), /PROCESSOR_FAILURE_RATE/);
     fails(testEnv({ RETENTION_DAYS: '-1' }), /RETENTION_DAYS/);
+    fails(testEnv({ PROCESSOR_TIMEOUT_MS: '30000' }), /PROCESSOR_TIMEOUT_MS must be an integer between 100 and 25000/); // must stay below the 30 s lease
+    fails(testEnv({ PROCESSOR_TIMEOUT_MS: '50' }), /PROCESSOR_TIMEOUT_MS/);
     fails(testEnv({ LOG_LEVEL: 'loud' }), /LOG_LEVEL/);
     fails(testEnv({ WEBHOOK_ALLOW_INSECURE_URLS: 'yes' }), /WEBHOOK_ALLOW_INSECURE_URLS/);
   });

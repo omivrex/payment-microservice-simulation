@@ -144,6 +144,7 @@ All configuration comes from environment variables. The service **refuses to sta
 | `HASHING_SECRET` | **yes** | – | Secret for API key hashes and card fingerprints (≥ 32 bytes, base64) |
 | `PROCESSOR_LATENCY_MS` | no | `300` | Simulated processor delay |
 | `PROCESSOR_FAILURE_RATE` | no | `0` | Probability (0–1) of a simulated transient processor error, for exercising retries |
+| `PROCESSOR_TIMEOUT_MS` | no | `10000` | Time limit for each processor call (100–25000, kept below the 30 s job lease). A call that hasn't answered is abandoned and retried (see [Lifecycle §3.4](03-payment-lifecycle.md#34-the-payment-worker)) |
 | `WORKER_CONCURRENCY` | no | `5` | Maximum jobs processed at the same time |
 | `WEBHOOK_ALLOW_INSECURE_URLS` | no | `false` | Allow `http://` and private/loopback webhook URLs (local development only) |
 | `RETENTION_DAYS` | no | `7` | How long completed jobs, events and deliveries are kept |

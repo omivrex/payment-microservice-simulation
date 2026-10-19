@@ -14,6 +14,8 @@ export interface Config {
   hashingSecret: Buffer;
   processorLatencyMs: number;
   processorFailureRate: number;
+  /** Time limit per processor call. Kept below the 30 s job lease, so a run always ends before its lease expires. */
+  processorTimeoutMs: number;
   workerConcurrency: number;
   webhookAllowInsecureUrls: boolean;
   retentionDays: number;
@@ -120,6 +122,7 @@ export function loadConfig(env: Env = process.env): Config {
     hashingSecret,
     processorLatencyMs: int('PROCESSOR_LATENCY_MS', 300, 0, 60_000),
     processorFailureRate: decimal('PROCESSOR_FAILURE_RATE', 0, 0, 1),
+    processorTimeoutMs: int('PROCESSOR_TIMEOUT_MS', 10_000, 100, 25_000),
     workerConcurrency: int('WORKER_CONCURRENCY', 5, 1, 100),
     webhookAllowInsecureUrls: bool('WEBHOOK_ALLOW_INSECURE_URLS', false),
     retentionDays: int('RETENTION_DAYS', 7, 1, 3650),

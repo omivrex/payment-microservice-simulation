@@ -268,3 +268,165 @@ describe('§3.6 recovery across restarts', () => {
     await second.ctx.db.close();
   });
 });
+
+describe('§3.4 processor time limit and giving up on reclaimed leases', () => {
+  // These tests use a short real-time limit; leases use the fake clock.
+  let tApp: TestApp;
+  let tProc: ScriptedProcessor;
+  let tm: TestMerchant;
+  const TIMEOUT = 150;
+
+  beforeEach(async () => {
+    tProc = new ScriptedProcessor();
+    tApp = await startTestApp({ processor: tProc, config: { workerConcurrency: 2, processorTimeoutMs: TIMEOUT } });
+    tm = await createMerchant(tApp);
+  });
+  afterEach(async () => {
+    tProc.blocking = false;
+    tProc.release();
+    await tApp.close();
+  });
+
+  const tPay = async (body: Record<string, unknown> = {}) =>
+    (await tApp.api('POST', '/payments', { key: tm.sk, body: { amountMinor: 1000, currency: 'usd', card: card(), captureMethod: 'manual', ...body } })).body.id as string;
+  const tPayment = (id: string) => tApp.ctx.db.read(tm.id, (d) => d.payments[id]!);
+  const tJob = (id: string, type = 'authorize') => tApp.ctx.db.read(tm.id, (d) => Object.values(d.jobs).find((j) => j.paymentId === id && j.type === type)!);
+
+  it('a hung call is abandoned at the time limit: the slot is freed, the job is requeued, other payments proceed', async () => {
+    tProc.blocking = true; // calls never answer, and ignore the abort signal (worst case)
+    const ids = [await tPay(), await tPay(), await tPay()];
+    const started = Date.now();
+    await tApp.runWorker(); // claims 2 (concurrency 2); both hang, then time out
+    assert.ok(Date.now() - started < TIMEOUT * 10, 'did not wait forever');
+    assert.equal(tProc.inFlight, 2, 'the processor calls themselves are still hung');
+    for (const id of ids.slice(0, 2)) {
+      const job = tJob(id);
+      assert.equal(job.status, 'queued', 'requeued, not stuck as running');
+      assert.equal(job.lastError, 'processor_timeout');
+      assert.equal(job.lockedUntil, null, 'lease released');
+    }
+    tProc.blocking = false;
+    await tApp.runWorker(); // slots are free again: the third payment is claimed
+    assert.equal(tPayment(ids[2]!).status, 'authorized', 'other payments are not blocked by hung calls');
+  });
+
+  it('the database stays writable while processor calls hang', async () => {
+    tProc.blocking = true;
+    const id = await tPay();
+    await tApp.worker.tickOnce();
+    const t0 = Date.now();
+    const created = await tApp.api('POST', '/payments', { key: tm.sk, body: { amountMinor: 1, currency: 'usd', card: card() } });
+    const patched = await tApp.api('PATCH', `/payments/${id}`, { key: tm.sk, body: { description: 'during hang' } });
+    assert.equal(created.status, 202);
+    assert.equal(patched.status, 200);
+    assert.ok(Date.now() - t0 < 1000, 'writes are not blocked by the hung call');
+    await tApp.worker.whenIdle();
+  });
+
+  it('retries are not refused: after a timeout the job runs again (backoff) and can succeed', async () => {
+    tProc.blocking = true;
+    const id = await tPay();
+    await tApp.runWorker();
+    assert.equal(tJob(id).attempts, 1);
+    tProc.blocking = false;
+    tApp.clock.advance(2000); // backoff after attempt 1
+    await tApp.runWorker();
+    assert.equal(tJob(id).attempts, 2);
+    assert.equal(tPayment(id).status, 'authorized');
+  });
+
+  it('every attempt times out → after maxAttempts the payment fails (processing_error), never retried forever', async () => {
+    tProc.blocking = true;
+    const id = await tPay();
+    for (let i = 0; i < 7; i++) {
+      await tApp.runWorker();
+      tApp.clock.advance(20_000);
+    }
+    const job = tJob(id);
+    assert.equal(job.attempts, 5);
+    assert.equal(job.status, 'failed');
+    assert.equal(tPayment(id).status, 'failed');
+    assert.equal(tPayment(id).failure?.code, 'processing_error');
+    assert.equal(tProc.calls.length, 5, 'exactly maxAttempts calls');
+  });
+
+  it('a capture whose every attempt times out → reverted to authorized with payment.action_failed (processor_timeout)', async () => {
+    const id = await tPay();
+    await tApp.runWorker();
+    await tApp.api('POST', `/payments/${id}/capture`, { key: tm.sk });
+    tProc.blocking = true;
+    for (let i = 0; i < 7; i++) {
+      await tApp.runWorker();
+      tApp.clock.advance(20_000);
+    }
+    assert.equal(tPayment(id).status, 'authorized');
+    assert.equal(tJob(id, 'capture').status, 'failed');
+    const evt = tApp.ctx.db.read(tm.id, (d) => Object.values(d.events).find((e) => e.type === 'payment.action_failed')!);
+    assert.equal(evt.data.action?.code, 'processor_timeout');
+  });
+
+  it('lease expired on the FINAL attempt → given up (not reclaimed), even while every slot is busy', async () => {
+    tProc.blocking = true;
+    const stuck = await tPay();
+    // Simulate a process that died during the 5th (last) attempt: running, lease expired, attempts = max.
+    await tApp.ctx.db.transact(tm.id, (d) => {
+      const job = Object.values(d.jobs).find((j) => j.paymentId === stuck)!;
+      Object.assign(job, { status: 'running', attempts: job.maxAttempts, lockedUntil: new Date(tApp.clock.now().getTime() - 1000).toISOString() });
+    });
+    // Fill both slots with hung calls from other payments.
+    await tPay();
+    await tPay();
+    await tApp.worker.tickOnce();
+    tApp.clock.advance(1000);
+    await tApp.worker.tickOnce(); // slots are full, but the give-up check doesn't need one
+    const job = tJob(stuck);
+    assert.equal(job.status, 'failed');
+    assert.equal(job.lastError, 'lease expired on the final attempt');
+    assert.equal(job.attempts, 5, 'not incremented past maxAttempts');
+    assert.equal(tPayment(stuck).status, 'failed');
+    assert.ok(!tProc.calls.some((c) => c.reference === job.id), 'never sent to the processor again');
+    tProc.blocking = false;
+    tProc.release();
+    await tApp.worker.whenIdle();
+  });
+
+  it('a capture whose lease expired on the final attempt → reverted to authorized, not stuck in capturing', async () => {
+    const id = await tPay();
+    await tApp.runWorker();
+    await tApp.api('POST', `/payments/${id}/capture`, { key: tm.sk });
+    await tApp.ctx.db.transact(tm.id, (d) => {
+      const job = Object.values(d.jobs).find((j) => j.paymentId === id && j.type === 'capture')!;
+      Object.assign(job, { status: 'running', attempts: job.maxAttempts, lockedUntil: new Date(tApp.clock.now().getTime() - 1).toISOString() });
+    });
+    await tApp.worker.tickOnce();
+    assert.equal(tPayment(id).status, 'authorized');
+    assert.equal(tPayment(id).pendingAction, null);
+    assert.equal((await tApp.api('POST', `/payments/${id}/capture`, { key: tm.sk })).status, 202, 'the merchant can try again');
+  });
+
+  it('a late answer arriving after the time limit is ignored (no double transition)', async () => {
+    tProc.blocking = true;
+    const id = await tPay();
+    await tApp.runWorker(); // times out, requeued
+    tProc.blocking = false;
+    tApp.clock.advance(2000);
+    await tApp.runWorker(); // attempt 2 succeeds → authorized
+    tProc.release(); // attempt 1's hung call finally answers
+    await new Promise((r) => setTimeout(r, 20));
+    const p = tPayment(id);
+    assert.equal(p.status, 'authorized');
+    assert.equal(p.history.filter((h) => h.type === 'authorized').length, 1);
+  });
+});
+
+describe('§3.5 simulated processor honours the abort signal', () => {
+  it('stops waiting as soon as the call is aborted', async () => {
+    const { createSimulatedProcessor } = await import('../../src/processor/simulatedProcessor.ts');
+    const sim = createSimulatedProcessor({ latencyMs: 5000, failureRate: 0, clock: new FakeClock() });
+    const controller = new AbortController();
+    setTimeout(() => controller.abort(), 50);
+    const started = Date.now();
+    await assert.rejects(sim.capture({ reference: 'job_1', authorizationCode: 'A', amountMinor: 1, signal: controller.signal }));
+    assert.ok(Date.now() - started < 1000);
+  });
+});

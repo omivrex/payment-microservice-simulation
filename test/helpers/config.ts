@@ -17,6 +17,7 @@ export function testConfig(overrides: Partial<Config> = {}): Config {
     hashingSecret: randomBytes(32),
     processorLatencyMs: 0,
     processorFailureRate: 0,
+    processorTimeoutMs: 10_000,
     workerConcurrency: 5,
     webhookAllowInsecureUrls: true,
     retentionDays: 7,

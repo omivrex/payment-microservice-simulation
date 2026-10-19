@@ -260,6 +260,8 @@ flowchart TD
 |---|---|---|
 | Processor decline | Normal outcome. Payment → `failed` | `info` |
 | Processor transient error | Retry with backoff | `warn` |
+| Processor call exceeds `PROCESSOR_TIMEOUT_MS` | Aborted and treated as a transient error: slot freed, retried with backoff, given up after 5 attempts | `warn` "processor call timed out" |
+| Lease expired on the final attempt (process died mid-run) | Given up: payment failed or action reverted, never reclaimed again | `error` |
 | **Bug inside a job handler** | Caught **per job**, retried like a transient error, then the payment is failed or reverted | `error` + stack + `jobId`, `paymentId`, `merchantId`, `attempt` |
 | **Decryption failure** for a card | Fail permanently (retrying can't help). The payment fails with the generic `processing_error`, so the merchant learns nothing about the cause | `error`, `security: true`, with the record ID (never the ciphertext) |
 | **Exception in the tick itself** (e.g. storage failure while claiming) | Caught at tick level. The loop **carries on** at the next tick | `error` + stack |
