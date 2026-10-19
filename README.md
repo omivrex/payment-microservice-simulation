@@ -19,7 +19,7 @@ yarn install
 yarn gen:secrets          # creates .env (from .env.example) with placeholder secrets filled in
 ```
 
-The generated `ENCRYPTION_KEYS` and `HASHING_SECRET` are **placeholders**: random values that are fine for local use. Replace them with your own random values before any shared or production use (`openssl rand -base64 32` gives a valid value). They must be base64-encoded: exactly 32 bytes for an encryption key, at least 32 bytes for the hashing secret. Re-running the script keeps existing keys; `yarn gen:secrets --force` replaces them, which makes existing encrypted data unreadable.
+The generated `ENCRYPTION_KEYS` and `HASHING_SECRET` are **placeholders**: random values that are fine for local use. Replace them with your own random values before any shared or production use (`openssl rand -base64 32` gives a valid value). They must be base64-encoded: exactly 32 bytes for an encryption key, at least 32 bytes for the hashing secret. Re-running the script keeps existing keys (`yarn gen:secrets --force` replaces them, which makes existing encrypted data unreadable). It also adds any settings introduced since your `.env` was created, commented out with their defaults, so **re-run `yarn gen:secrets` after pulling changes** to see new options. Your values are never changed.
 
 For local webhook testing against `http://localhost`, add `WEBHOOK_ALLOW_INSECURE_URLS=true` to `.env`. Never set it in production. All variables are listed in [docs/01-architecture.md §1.6](docs/01-architecture.md#16-configuration).
 

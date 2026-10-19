@@ -6,6 +6,9 @@ import { pathToFileURL } from 'node:url';
  * yarn gen:secrets — writes freshly generated placeholder secrets into .env
  * (creating it from .env.example if needed). See docs/01-architecture.md §1.6.
  *
+ * When .env already exists, settings added to .env.example since it was created are appended (commented out,
+ * with their defaults), so an older .env learns about them. No existing value is changed.
+ *
  * Existing non-empty keys are KEPT unless --force is passed: replacing them on an
  * existing database makes stored card numbers and webhook secrets unreadable and
  * invalidates every issued secret API key.
@@ -60,16 +63,42 @@ export function applySecrets(content: string, options: { force: boolean; random?
   return { content: out, set, kept };
 }
 
+export const NEW_SETTINGS_COMMENT = '# --- Settings added since this .env was created (by `yarn gen:secrets`; defaults shown, uncomment to change) ---';
+
+/**
+ * Adds every setting listed in .env.example that `content` doesn't mention at all (neither set nor commented),
+ * copied as it appears there (commented out, with its default). Keeps an older .env aware of settings
+ * introduced later, without changing any value. Pure, so it can be tested.
+ */
+export function addMissingSettings(content: string, example: string): { content: string; added: string[] } {
+  const mentioned = (name: string) => new RegExp(`^\\s*#?\\s*${name}=`, 'm').test(content);
+  const lines: string[] = [];
+  const added: string[] = [];
+  for (const line of example.split('\n')) {
+    const name = /^\s*#?\s*([A-Z][A-Z0-9_]*)=/.exec(line)?.[1];
+    if (name && !mentioned(name) && !added.includes(name)) {
+      lines.push(line.trimEnd());
+      added.push(name);
+    }
+  }
+  if (added.length === 0) return { content, added };
+  return { content: `${content.replace(/\n*$/, '\n')}\n${NEW_SETTINGS_COMMENT}\n${lines.join('\n')}\n`, added };
+}
+
 function main(): void {
   const force = process.argv.includes('--force');
-  const source = existsSync('.env') ? '.env' : existsSync('.env.example') ? '.env.example' : null;
-  const original = source ? readFileSync(source, 'utf8') : '';
-  const { content, set, kept } = applySecrets(original, { force });
-  writeFileSync('.env', content, { mode: 0o600 });
+  const hasEnv = existsSync('.env');
+  const example = existsSync('.env.example') ? readFileSync('.env.example', 'utf8') : '';
+  const original = hasEnv ? readFileSync('.env', 'utf8') : example;
+  const secrets = applySecrets(original, { force });
+  // An existing .env may predate settings added to .env.example since: list them (commented, defaults shown).
+  const synced = hasEnv ? addMissingSettings(secrets.content, example) : { content: secrets.content, added: [] };
+  writeFileSync('.env', synced.content, { mode: 0o600 });
 
-  console.log(`.env ${source === '.env' ? 'updated' : 'created'}.`);
-  if (set.length) console.log(`  set:  ${set.join(', ')} (placeholder values, see the comment in .env)`);
-  if (kept.length) console.log(`  kept: ${kept.join(', ')} (already set; use --force to replace, which breaks existing data)`);
+  console.log(`.env ${hasEnv ? 'updated' : 'created'}.`);
+  if (secrets.set.length) console.log(`  set:   ${secrets.set.join(', ')} (placeholder values, see the comment in .env)`);
+  if (secrets.kept.length) console.log(`  kept:  ${secrets.kept.join(', ')} (already set; use --force to replace, which breaks existing data)`);
+  if (synced.added.length) console.log(`  added: ${synced.added.join(', ')} (new settings from .env.example, commented out with their defaults)`);
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) main();

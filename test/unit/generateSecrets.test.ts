@@ -5,7 +5,8 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { parseEnv } from 'node:util';
 import { describe, it } from 'node:test';
-import { applySecrets, PLACEHOLDER_COMMENT } from '../../scripts/generate-secrets.ts';
+import { addMissingSettings, applySecrets, NEW_SETTINGS_COMMENT, PLACEHOLDER_COMMENT } from '../../scripts/generate-secrets.ts';
+import { writeFileSync } from 'node:fs';
 import { loadConfig } from '../../src/config.ts';
 
 const ROOT = path.resolve(import.meta.dirname, '../..');
@@ -57,6 +58,46 @@ describe('yarn gen:secrets', () => {
     assert.match(content, /^# HASHING_SECRET=commented-out$/m, 'comments untouched');
   });
 
+  it('an older .env gains settings added to .env.example since (commented, defaults shown); values untouched', () => {
+    const older = 'ENCRYPTION_KEYS=v1:abc\nENCRYPTION_ACTIVE_KEY_ID=v1\nHASHING_SECRET=xyz\nPORT=4000\n# LOG_LEVEL=info\n';
+    const { content, added } = addMissingSettings(older, example);
+    assert.ok(added.includes('PROCESSOR_TIMEOUT_MS'));
+    assert.ok(!added.includes('PORT') && !added.includes('LOG_LEVEL') && !added.includes('HASHING_SECRET'), 'already mentioned (set or commented)');
+    assert.ok(content.startsWith(older), 'existing lines unchanged');
+    assert.match(content, new RegExp(`${NEW_SETTINGS_COMMENT.replace(/[.*+?^${}()|[\]\\`]/g, '\\$&')}\n[^]*^# PROCESSOR_TIMEOUT_MS=10000$`, 'm'));
+    assert.equal(parseEnv(content).PROCESSOR_TIMEOUT_MS, undefined, 'added commented out: the code default still applies');
+    assert.equal(parseEnv(content).PORT, '4000');
+  });
+
+  it('adding settings is idempotent: a second run adds nothing', () => {
+    const once = addMissingSettings('PORT=4000\n', example).content;
+    const twice = addMissingSettings(once, example);
+    assert.deepEqual(twice.added, []);
+    assert.equal(twice.content, once);
+  });
+
+  it('a .env created from the current .env.example needs nothing added', () => {
+    const fresh = applySecrets(example, { force: false }).content;
+    assert.deepEqual(addMissingSettings(fresh, example).added, []);
+  });
+
+  it('end to end: re-running on an older .env adds the new settings and keeps every value', () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'gen-secrets-old-'));
+    try {
+      copyFileSync(path.join(ROOT, '.env.example'), path.join(dir, '.env.example'));
+      const older = 'ENCRYPTION_KEYS=v1:' + 'A'.repeat(43) + '=\nENCRYPTION_ACTIVE_KEY_ID=v1\nHASHING_SECRET=' + 'B'.repeat(43) + '=\nPORT=4000\n';
+      writeFileSync(path.join(dir, '.env'), older);
+      const run = spawnSync(process.execPath, ['--import', import.meta.resolve('tsx'), path.join(ROOT, 'scripts/generate-secrets.ts')], { cwd: dir, encoding: 'utf8' });
+      assert.equal(run.status, 0, run.stderr);
+      assert.match(run.stdout, /added: .*PROCESSOR_TIMEOUT_MS/);
+      const after = readFileSync(path.join(dir, '.env'), 'utf8');
+      assert.ok(after.startsWith(older), 'secrets and existing settings untouched');
+      assert.match(after, /^# PROCESSOR_TIMEOUT_MS=10000$/m);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('end to end: creates .env from .env.example (mode 0600); a second run keeps the keys', () => {
     const dir = mkdtempSync(path.join(tmpdir(), 'gen-secrets-'));
     try {
@@ -71,7 +112,7 @@ describe('yarn gen:secrets', () => {
       assert.ok(!first.stdout.includes(parseEnv(created).HASHING_SECRET!), 'secrets are not printed');
 
       const second = run();
-      assert.match(second.stdout, /kept: ENCRYPTION_KEYS, ENCRYPTION_ACTIVE_KEY_ID, HASHING_SECRET/);
+      assert.match(second.stdout, /kept:\s+ENCRYPTION_KEYS, ENCRYPTION_ACTIVE_KEY_ID, HASHING_SECRET/);
       assert.equal(readFileSync(path.join(dir, '.env'), 'utf8'), created);
     } finally {
       rmSync(dir, { recursive: true, force: true });
