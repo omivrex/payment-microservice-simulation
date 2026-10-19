@@ -19,7 +19,7 @@ import { storeResponse } from '../../http/middleware/idempotency.js';
 import type { RouteDeps } from '../../http/routeDeps.js';
 import { paginationQuery, parseBody, parseOptionalBody, parseQuery } from '../../http/validate.js';
 import { cardInputSchema, customerIdSchema } from '../cards/cardInput.js';
-import { MAX_METADATA_KEYS, type CardSource } from './service.js';
+import { MAX_METADATA_KEYS, STATUS_UPDATES, type CardSource, type PaymentUpdateResult } from './service.js';
 
 export const CURRENCIES = ['USD', 'EUR', 'GBP', 'CAD', 'AUD', 'NGN', 'JPY'] as const;
 export const PAYMENT_STATUSES = ['pending', 'authorized', 'capturing', 'captured', 'refunding', 'partially_refunded', 'refunded', 'cancelling', 'cancelled', 'failed'] as const;
@@ -71,7 +71,23 @@ const createSchema = z
     if (v.saveCard && v.cardId !== undefined) ctx.addIssue({ code: 'custom', path: ['saveCard'], message: 'cannot be used with cardId (the card is already saved)' });
   });
 
-const updateSchema = z.strictObject({ description: descriptionSchema.optional(), metadata: metadataPatchSchema.optional() });
+// `status` is accepted to meet the project requirement (docs/05-api.md §5.8); it maps onto capture/refund/cancel.
+const updateSchema = z
+  .strictObject({
+    description: descriptionSchema.optional(),
+    metadata: metadataPatchSchema.optional(),
+    status: z
+      .enum(STATUS_UPDATES, {
+        error: 'can only be set to captured, refunded or cancelled (the same as POST /payments/{id}/capture, /refund and /cancel)',
+      })
+      .optional(),
+    amountMinor: amountSchema.optional(),
+  })
+  .superRefine((v, ctx) => {
+    if (v.amountMinor !== undefined && v.status !== 'captured' && v.status !== 'refunded') {
+      ctx.addIssue({ code: 'custom', path: ['amountMinor'], message: 'can only be sent with status captured or refunded (partial capture/refund)' });
+    }
+  });
 
 const amountBodySchema = z.strictObject({ amountMinor: amountSchema.optional() });
 const emptyBodySchema = z.strictObject({});
@@ -114,13 +130,21 @@ export function paymentsRouter({ services, auth, idempotency }: RouteDeps): Rout
     res.json(services.payments.get(req.auth!.merchantId, req.params.id as string));
   });
 
-  route(router, 'patch', '/payments/:id', ...auth.secret, async (req, res) => {
-    const body = parseBody(updateSchema, req.body);
+  route(router, 'patch', '/payments/:id', ...auth.secret, idempotency, async (req, res) => {
+    const body = parseBody(updateSchema, req.body, RENAMED);
     // Checked after the strict parse so unknown fields are reported on their own.
-    if (body.description === undefined && body.metadata === undefined) {
-      throw new ValidationError([{ field: 'body', message: 'must include at least one of: description, metadata' }]);
+    if (body.description === undefined && body.metadata === undefined && body.status === undefined) {
+      throw new ValidationError([{ field: 'body', message: 'must include at least one of: description, metadata, status' }]);
     }
-    res.json(await services.payments.update(req.auth!.merchantId, req.params.id as string, body));
+    const httpStatus = (r: PaymentUpdateResult) => (r.statusChangeRequested ? 202 : 200);
+    const result = await services.payments.update(
+      req.auth!.merchantId,
+      req.params.id as string,
+      body,
+      req.requestId,
+      storeResponse(req, httpStatus, (r) => r.payment),
+    );
+    res.status(httpStatus(result)).json(result.payment);
   });
 
   route(router, 'post', '/payments/:id/capture', ...auth.secret, idempotency, async (req, res) => {
@@ -263,19 +287,40 @@ export const paymentsOpenApi: OpenApiModule = {
         responses: { '200': jsonResponse('The payment', ref('Payment')), '401': commonErrors['401'], '403': commonErrors['403'], '404': errorResponse('Unknown payment, or another merchant’s payment') },
       },
       patch: {
-        summary: 'Update description and/or metadata (merged; null deletes a key)',
-        description: 'Allowed in every status. Status and amounts can only change through capture/refund/cancel. Emits payment.updated.',
+        summary: 'Update description/metadata, and/or change the status (captured, refunded, cancelled)',
+        description:
+          '**description / metadata**: metadata is merged; `null` deletes a key. Allowed in every status. Emits payment.updated. Returns 200.\n\n' +
+          '**status**: added to meet the project requirement that a payment\'s status can be updated through PATCH. ' +
+          'It is not a free-form write: each value runs exactly the same rules and asynchronous job as the matching action endpoint, ' +
+          'so the state machine still applies. `captured` = POST /payments/{id}/capture (status must be "authorized"); ' +
+          '`refunded` = POST /payments/{id}/refund (status "captured" or "partially_refunded"); ' +
+          '`cancelled` = POST /payments/{id}/cancel (status "authorized"). Any other value → 400. ' +
+          'Optional `amountMinor` with captured/refunded for a partial capture/refund. ' +
+          'Returns **202** with the transitional status (capturing / refunding / cancelling); the final status arrives by webhook.\n\n' +
+          'Everything in one request is applied atomically. Supports Idempotency-Key.',
         security: secretKeyAuth,
-        parameters: [paymentIdParam],
+        parameters: [paymentIdParam, idempotencyHeader],
         requestBody: jsonBody({
           type: 'object',
           additionalProperties: false,
           properties: {
             description: { type: ['string', 'null'], maxLength: 500 },
             metadata: { type: 'object', additionalProperties: { type: ['string', 'null'], maxLength: 500 } },
+            status: { type: 'string', enum: [...STATUS_UPDATES], description: 'Runs the matching action: captured → capture, refunded → refund, cancelled → cancel' },
+            amountMinor: { type: 'integer', minimum: 1, maximum: MAX_AMOUNT, description: `Only with status captured/refunded (partial). ${MINOR_UNITS}` },
           },
         }),
-        responses: { '200': jsonResponse('Updated payment', ref('Payment')), '400': commonErrors['400'], '401': commonErrors['401'], '403': commonErrors['403'], '404': errorResponse('Unknown payment'), '503': commonErrors['503'] },
+        responses: {
+          '200': jsonResponse('Description/metadata updated (no status change)', ref('Payment')),
+          '202': jsonResponse('Status change accepted: the payment is now capturing / refunding / cancelling', ref('Payment')),
+          '400': commonErrors['400'],
+          '401': commonErrors['401'],
+          '403': commonErrors['403'],
+          '404': errorResponse('Unknown payment'),
+          '409': errorResponse('`invalid_state`: the status change is not allowed from the current status (or another action is in flight); `idempotency_in_progress`'),
+          '422': errorResponse('`idempotency_key_reused`'),
+          '503': commonErrors['503'],
+        },
       },
     },
     '/payments/{id}/capture': {

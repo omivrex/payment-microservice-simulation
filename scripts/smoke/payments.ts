@@ -105,8 +105,23 @@ export async function payments(s: SmokeContext): Promise<void> {
   s.check('old field name "amount" → 400 saying it was renamed to amountMinor', oldName.status === 400 && /renamed to amountMinor/.test(JSON.stringify(oldName.body)));
   s.check('unknown cardId → 404', (await create({ cardId: 'card_00000000000000000000000000000000' })).status === 404);
   s.check('publishable key cannot create payments → 403', (await s.call('POST', '/payments', { key: pk, body: { amountMinor: 1, currency: 'usd', card: card() } })).status === 403);
-  const patchStatus = await s.call('PATCH', `/payments/${auto.body.id}`, { key: sk, body: { status: 'refunded', amountMinor: 1 } });
-  s.check('PATCH status/amount → 400 naming both fields', patchStatus.status === 400 && patchStatus.body.error.details.length === 2);
+  const badStatus = await s.call('PATCH', `/payments/${auto.body.id}`, { key: sk, body: { status: 'authorized' } });
+  s.check('PATCH status to anything but captured/refunded/cancelled → 400', badStatus.status === 400 && /captured, refunded or cancelled/.test(JSON.stringify(badStatus.body)));
+  const noStatusAmount = await s.call('PATCH', `/payments/${auto.body.id}`, { key: sk, body: { amountMinor: 1 } });
+  s.check('PATCH amountMinor without status → 400', noStatusAmount.status === 400);
+
+  s.section('Payments: PATCH status (added to meet the project requirement)');
+  const viaPatch = await create({ card: card(), captureMethod: 'manual' });
+  await waitFor('authorization before PATCH status', viaPatch.body.id, ['authorized']);
+  const cancelTooEarly = await s.call('PATCH', `/payments/${viaPatch.body.id}`, { key: sk, body: { status: 'refunded' } });
+  s.check('PATCH status=refunded on an authorized payment → 409 (same rule as POST /refund)', cancelTooEarly.status === 409);
+  const patchCapture = await s.call('PATCH', `/payments/${viaPatch.body.id}`, { key: sk, body: { status: 'captured', amountMinor: 2000, description: 'captured via PATCH' } });
+  s.check('PATCH status=captured + amountMinor + description → 202 capturing, description applied', patchCapture.status === 202 && patchCapture.body.status === 'capturing' && patchCapture.body.description === 'captured via PATCH');
+  const patchCaptured = await waitFor('PATCH capture to finish', viaPatch.body.id, ['captured']);
+  s.check('→ captured with amountCapturedMinor 2000', patchCaptured?.amountCapturedMinor === 2000);
+  const patchRefund = await s.call('PATCH', `/payments/${viaPatch.body.id}`, { key: sk, body: { status: 'refunded' } });
+  s.check('PATCH status=refunded → 202 refunding', patchRefund.status === 202 && patchRefund.body.status === 'refunding');
+  s.check('→ refunded', !!(await waitFor('PATCH refund to finish', viaPatch.body.id, ['refunded'])));
   const patchOk = await s.call('PATCH', `/payments/${auto.body.id}`, { key: sk, body: { metadata: { orderId: null, note: 'gift' } } });
   s.check('PATCH metadata merge (null deletes)', patchOk.status === 200 && JSON.stringify(patchOk.body.metadata) === '{"note":"gift"}');
 

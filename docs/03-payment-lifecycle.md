@@ -46,7 +46,7 @@ stateDiagram-v2
 
 ### Allowed actions per status
 
-| Status | capture | refund | cancel | PATCH (description/metadata) |
+| Status | capture (or `PATCH` `status: "captured"`) | refund (or `PATCH` `status: "refunded"`) | cancel (or `PATCH` `status: "cancelled"`) | PATCH (description/metadata) |
 |---|:-:|:-:|:-:|:-:|
 | `pending` | ✗ | ✗ | ✗ | ✓ |
 | `authorized` | ✓ | ✗ | ✓ | ✓ |
@@ -62,7 +62,7 @@ A disallowed action returns `409 invalid_state`, with a message naming the curre
 | **No cancel while `pending`** | The worker may already be talking to the processor. Allowing cancel here would create a race between "cancelled" and "authorized". The client waits for `authorized`, then cancels |
 | **No actions while an action is in flight** | Prevents, for example, two refunds that together exceed the captured amount. One pending action at a time makes the amount checks reliable |
 | **PATCH is always allowed** | Description and metadata are the merchant's own labels. They don't affect money, so there's no reason to lock them |
-| **Status can only change through actions** | `PATCH` can't set `status` or `amountMinor`, so nobody can bypass the state machine |
+| **Status changes always go through an action** | `PATCH` accepts `status` only as `captured`, `refunded` or `cancelled`, and each runs the matching action (capture, refund, cancel) with exactly the same rules. This was added to meet the project requirement that status can be updated through `PATCH` ([API §5.8](05-api.md#58-payments)). No request can set a status directly, so nobody can bypass the state machine |
 | **Partial capture releases the rest** | Matches how card networks behave: one capture per authorization. Capturing $6 of a $10 authorization leaves $4 that can't be captured later |
 
 ### Amount rules
@@ -248,7 +248,7 @@ Worker tests use the fake clock, `tickOnce()` and the scripted processor describ
 |---|---|---|
 | **Every status × every action** (10 statuses × capture/refund/cancel), table-driven: allowed → `202` + transitional status. Disallowed → `409 invalid_state` naming the current status | The "allowed actions" table (§3.2), exhaustively | One forgotten combination letting money move from the wrong state |
 | `PATCH` succeeds in every status, including terminal ones | Labels never lock | – |
-| `PATCH` with `status` or `amountMinor` → 400 naming the field | Status changes only through actions | Bypassing the state machine |
+| `PATCH` `status` other than `captured`/`refunded`/`cancelled` → 400. **Every status × each of the three values gives the same result as the matching action endpoint** (matrix run through both routes). `amountMinor` without a status → 400. Status + description: all or nothing | `PATCH` status is routed through the actions (project requirement) | Bypassing the state machine through `PATCH` |
 | Cancel while `pending` → 409 | No cancel during authorization | Race between "cancelled" and "authorized" |
 
 ### Creating payments

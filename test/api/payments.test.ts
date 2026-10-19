@@ -356,13 +356,12 @@ describe('§5.8 PATCH /payments/:id', () => {
     assert.equal(Object.keys((await get(res.body.id)).body.metadata).length, 20, 'unchanged');
   });
 
-  it('empty body, amount or status → 400 naming the field; works in a terminal status', async () => {
+  it('empty body → 400; description works in a terminal status', async () => {
     const p = await settled({ card: card('4000000000000002') });
     assert.equal(p.status, 'failed');
-    assert.equal((await app.api('PATCH', `/payments/${p.id}`, { key: m.sk, body: {} })).status, 400);
-    const bad = await app.api('PATCH', `/payments/${p.id}`, { key: m.sk, body: { amountMinor: 1, status: 'captured' } });
-    assert.equal(bad.status, 400);
-    assert.deepEqual(bad.body.error.details.map((d: any) => d.field).sort(), ['amountMinor', 'status']);
+    const empty = await app.api('PATCH', `/payments/${p.id}`, { key: m.sk, body: {} });
+    assert.equal(empty.status, 400);
+    assert.match(empty.body.error.details[0].message, /description, metadata, status/);
     assert.equal((await app.api('PATCH', `/payments/${p.id}`, { key: m.sk, body: { description: 'post-mortem' } })).status, 200);
   });
 });
@@ -418,6 +417,130 @@ describe('§3.6 state machine (every status × every action)', () => {
           assert.match(r.body.error.message, new RegExp(status));
         }
       });
+
+      const target = { capture: 'captured', refund: 'refunded', cancel: 'cancelled' }[kind];
+      it(`${status} × PATCH status=${target} → same as ${kind}: ${allowed ? '202' : '409'}`, async () => {
+        const res = await pay({ card: card(), captureMethod: 'manual' });
+        await app.ctx.db.transact(m.id, (d) => {
+          const p = d.payments[res.body.id]!;
+          for (const j of Object.values(d.jobs)) if (j.paymentId === p.id) j.status = 'succeeded';
+          p.status = status;
+          p.authorizationCode = 'AUTH42';
+          p.amountCapturedMinor = ['captured', 'partially_refunded', 'refunded', 'refunding'].includes(status) ? 1000 : 0;
+          p.amountRefundedMinor = status === 'partially_refunded' ? 400 : status === 'refunded' ? 1000 : 0;
+          const transitional = ['pending', 'capturing', 'refunding', 'cancelling'].includes(status);
+          p.pendingAction = transitional ? { type: 'capture', amountMinor: null, jobId: 'job_x', previousStatus: 'authorized', requestedAt: p.createdAt } : null;
+        });
+        const r = await app.api('PATCH', `/payments/${res.body.id}`, { key: m.sk, body: { status: target } });
+        assert.equal(r.status, allowed ? 202 : 409, r.text);
+        if (allowed) assert.equal(r.body.pendingAction.type, kind);
+        else {
+          assert.equal(r.body.error.code, 'invalid_state');
+          assert.match(r.body.error.message, new RegExp(`Cannot ${kind} a payment with status "${status}"`));
+        }
+      });
     }
   }
+});
+
+describe('§5.8 PATCH status (added to meet the project requirement)', () => {
+  it('status=captured on an authorized payment → 202 capturing, then captured; same job as POST /capture', async () => {
+    const p = await settled({ card: card(), captureMethod: 'manual' });
+    const r = await app.api('PATCH', `/payments/${p.id}`, { key: m.sk, body: { status: 'captured' } });
+    assert.equal(r.status, 202);
+    assert.equal(r.body.status, 'capturing');
+    assert.deepEqual(r.body.pendingAction, { type: 'capture', amountMinor: 1000, requestedAt: r.body.pendingAction.requestedAt });
+    await app.settle();
+    assert.equal((await get(p.id)).body.status, 'captured');
+    assert.deepEqual(events(m.id, p.id).slice(-1), ['payment.captured']);
+  });
+
+  it('status=refunded with amountMinor → partial refund (→ partially_refunded); without → full refund', async () => {
+    const p = await settled({ card: card() });
+    assert.equal((await app.api('PATCH', `/payments/${p.id}`, { key: m.sk, body: { status: 'refunded', amountMinor: 300 } })).status, 202);
+    await app.settle();
+    assert.equal((await get(p.id)).body.status, 'partially_refunded');
+    assert.equal((await app.api('PATCH', `/payments/${p.id}`, { key: m.sk, body: { status: 'refunded' } })).body.pendingAction.amountMinor, 700);
+    await app.settle();
+    assert.equal((await get(p.id)).body.status, 'refunded');
+  });
+
+  it('status=cancelled on an authorized payment → cancelled', async () => {
+    const p = await settled({ card: card(), captureMethod: 'manual' });
+    assert.equal((await app.api('PATCH', `/payments/${p.id}`, { key: m.sk, body: { status: 'cancelled' } })).status, 202);
+    await app.settle();
+    assert.equal((await get(p.id)).body.status, 'cancelled');
+  });
+
+  it('any other status value → 400 naming the allowed values', async () => {
+    const p = await settled({ card: card(), captureMethod: 'manual' });
+    for (const status of ['pending', 'authorized', 'capturing', 'partially_refunded', 'refunding', 'cancelling', 'failed', 'CAPTURED', 'paid', '', 1, null]) {
+      const r = await app.api('PATCH', `/payments/${p.id}`, { key: m.sk, body: { status } });
+      assert.equal(r.status, 400, JSON.stringify(status));
+      assert.match(r.body.error.details.find((d: any) => d.field === 'status').message, /captured, refunded or cancelled/);
+    }
+    assert.equal((await get(p.id)).body.status, 'authorized', 'unchanged');
+  });
+
+  it('amount rules match the action endpoints: over-capture / over-refund → 400', async () => {
+    const auth = await settled({ card: card(), captureMethod: 'manual' });
+    const over = await app.api('PATCH', `/payments/${auth.id}`, { key: m.sk, body: { status: 'captured', amountMinor: 1001 } });
+    assert.equal(over.status, 400);
+    assert.match(over.body.error.details[0].message, /cannot exceed the authorized amount \(1000 in minor units\)/);
+    const cap = await settled({ card: card() });
+    assert.equal((await app.api('PATCH', `/payments/${cap.id}`, { key: m.sk, body: { status: 'refunded', amountMinor: 1001 } })).status, 400);
+  });
+
+  it('amountMinor without status, or with status=cancelled → 400', async () => {
+    const p = await settled({ card: card(), captureMethod: 'manual' });
+    for (const body of [{ amountMinor: 100 }, { status: 'cancelled', amountMinor: 100 }, { description: 'x', amountMinor: 100 }]) {
+      const r = await app.api('PATCH', `/payments/${p.id}`, { key: m.sk, body });
+      assert.equal(r.status, 400, JSON.stringify(body));
+      assert.match(r.body.error.details.find((d: any) => d.field === 'amountMinor').message, /only be sent with status captured or refunded/);
+    }
+  });
+
+  it('status + description in one request are applied together (202); a rejected status changes nothing', async () => {
+    const p = await settled({ card: card(), captureMethod: 'manual' });
+    const both = await app.api('PATCH', `/payments/${p.id}`, { key: m.sk, body: { status: 'captured', description: 'shipped', metadata: { note: 'x' } } });
+    assert.equal(both.status, 202);
+    assert.equal(both.body.status, 'capturing');
+    assert.equal(both.body.description, 'shipped');
+    const rejected = await app.api('PATCH', `/payments/${p.id}`, { key: m.sk, body: { status: 'cancelled', description: 'should not stick' } });
+    assert.equal(rejected.status, 409, 'cancel not allowed while capturing');
+    assert.equal((await get(p.id)).body.description, 'shipped', 'description unchanged: all or nothing');
+  });
+
+  it('PATCH status and POST /refund race → exactly one accepted', async () => {
+    const p = await settled({ card: card() });
+    const results = await Promise.all([
+      app.api('PATCH', `/payments/${p.id}`, { key: m.sk, body: { status: 'refunded' } }),
+      action(p.id, 'refund'),
+      app.api('PATCH', `/payments/${p.id}`, { key: m.sk, body: { status: 'refunded' } }),
+      action(p.id, 'refund'),
+    ]);
+    assert.equal(results.filter((r) => r.status === 202).length, 1, results.map((r) => r.status).join());
+    await app.settle();
+    const done = (await get(p.id)).body;
+    assert.equal(done.amountRefundedMinor, 1000, 'never over-refunded');
+  });
+
+  it('Idempotency-Key on PATCH status: a retry replays the 202 instead of failing with 409', async () => {
+    const p = await settled({ card: card(), captureMethod: 'manual' });
+    const headers = { 'idempotency-key': 'patch-capture-1' };
+    const first = await app.api('PATCH', `/payments/${p.id}`, { key: m.sk, body: { status: 'captured' }, headers });
+    const retry = await app.api('PATCH', `/payments/${p.id}`, { key: m.sk, body: { status: 'captured' }, headers });
+    assert.equal(first.status, 202);
+    assert.equal(retry.status, 202);
+    assert.equal(retry.headers.get('idempotent-replayed'), 'true');
+    const jobs = app.ctx.db.read(m.id, (d) => Object.values(d.jobs).filter((j) => j.paymentId === p.id && j.type === 'capture'));
+    assert.equal(jobs.length, 1, 'only one capture job');
+  });
+
+  it('the old field name "amount" on PATCH → 400 explaining the rename', async () => {
+    const p = await settled({ card: card(), captureMethod: 'manual' });
+    const r = await app.api('PATCH', `/payments/${p.id}`, { key: m.sk, body: { status: 'captured', amount: 100 } });
+    assert.equal(r.status, 400);
+    assert.match(r.body.error.details.find((d: any) => d.field === 'amount').message, /renamed to amountMinor/);
+  });
 });

@@ -137,11 +137,31 @@ export class PaymentsService {
     return { ...page, data: page.data.map(toPaymentView) };
   }
 
-  /** Description/metadata only. Metadata is merged; null deletes a key. Allowed in every status (§3.2). */
-  async update(merchantId: string, paymentId: string, input: { description?: string | null | undefined; metadata?: Record<string, string | null> | undefined }): Promise<PaymentView> {
+  /**
+   * PATCH: description/metadata (merged; null deletes a key), and optionally a status change.
+   *
+   * A status change is accepted only to meet the project requirement that a payment's status can be
+   * updated through PATCH (docs/05-api.md §5.8). It is not a free-form status write: `captured`,
+   * `refunded` and `cancelled` run exactly the same rules and job as POST /capture, /refund and
+   * /cancel, so the state machine (docs/03-payment-lifecycle.md §3.2) still applies. Everything in
+   * one request commits in one transaction, or not at all.
+   */
+  async update(
+    merchantId: string,
+    paymentId: string,
+    input: PaymentUpdate,
+    requestId: string | null,
+    inTx?: InTransaction<PaymentUpdateResult>,
+  ): Promise<PaymentUpdateResult> {
     const now = isoNow(this.clock);
     return this.db.transact(merchantId, (d) => {
       const p = findPayment(d, paymentId);
+      // The status change goes first, so a rejected one (409/400) leaves the labels unchanged too.
+      if (input.status !== undefined) {
+        const { type, plan } = this.#statusAction(input.status, input.amountMinor);
+        this.#applyAction(d, p, type, requestId, now, plan);
+      }
+      const labelsChanged = input.description !== undefined || input.metadata !== undefined;
       if (input.description !== undefined) p.description = input.description;
       if (input.metadata !== undefined) {
         for (const [key, value] of Object.entries(input.metadata)) {
@@ -152,71 +172,116 @@ export class PaymentsService {
           throw new ValidationError([{ field: 'metadata', message: `would exceed ${MAX_METADATA_KEYS} keys after merging` }]);
         }
       }
-      p.history.push({ type: 'updated', at: now });
-      p.updatedAt = now;
-      const view = toPaymentView(p);
-      recordEvent(d, merchantId, 'payment.updated', view as never, now);
-      return view;
+      if (labelsChanged) {
+        p.history.push({ type: 'updated', at: now });
+        p.updatedAt = now;
+        recordEvent(d, merchantId, 'payment.updated', toPaymentView(p) as never, now);
+      }
+      const result: PaymentUpdateResult = { payment: toPaymentView(p), statusChangeRequested: input.status !== undefined };
+      inTx?.(d, result);
+      return result;
     });
   }
 
   capture(merchantId: string, paymentId: string, amountMinor: number | undefined, requestId: string | null, inTx?: InTransaction<PaymentView>): Promise<PaymentView> {
-    return this.#requestAction(merchantId, paymentId, 'capture', requestId, inTx, (p) => {
-      if (p.status !== 'authorized') return null;
-      const toCapture = amountMinor ?? p.amountMinor;
-      if (toCapture > p.amountMinor) {
-        throw new ValidationError([{ field: 'amountMinor', message: `cannot exceed the authorized amount (${p.amountMinor} in minor units)` }]);
-      }
-      return { amountMinor: toCapture, nextStatus: 'capturing' };
-    });
+    return this.#requestAction(merchantId, paymentId, 'capture', requestId, inTx, capturePlan(amountMinor));
   }
 
   refund(merchantId: string, paymentId: string, amountMinor: number | undefined, requestId: string | null, inTx?: InTransaction<PaymentView>): Promise<PaymentView> {
-    return this.#requestAction(merchantId, paymentId, 'refund', requestId, inTx, (p) => {
-      if (p.status !== 'captured' && p.status !== 'partially_refunded') return null;
-      const refundable = p.amountCapturedMinor - p.amountRefundedMinor;
-      const toRefund = amountMinor ?? refundable;
-      if (toRefund > refundable) {
-        throw new ValidationError([{ field: 'amountMinor', message: `cannot exceed the refundable amount (${refundable} in minor units)` }]);
-      }
-      return { amountMinor: toRefund, nextStatus: 'refunding' };
-    });
+    return this.#requestAction(merchantId, paymentId, 'refund', requestId, inTx, refundPlan(amountMinor));
   }
 
   cancel(merchantId: string, paymentId: string, requestId: string | null, inTx?: InTransaction<PaymentView>): Promise<PaymentView> {
-    return this.#requestAction(merchantId, paymentId, 'cancel', requestId, inTx, (p) =>
-      p.status === 'authorized' ? { amountMinor: null, nextStatus: 'cancelling' } : null,
-    );
+    return this.#requestAction(merchantId, paymentId, 'cancel', requestId, inTx, cancelPlan());
   }
 
-  /**
-   * Shared shape of capture/refund/cancel: state check (409), amount check (400),
-   * queue a job, move to the transitional status. One pending action at a time.
-   */
+  /** Maps a requested status to the action that produces it (the only three allowed). */
+  #statusAction(status: StatusUpdate, amountMinor: number | undefined): { type: ActionType; plan: ActionPlan } {
+    if (status === 'captured') return { type: 'capture', plan: capturePlan(amountMinor) };
+    if (status === 'refunded') return { type: 'refund', plan: refundPlan(amountMinor) };
+    return { type: 'cancel', plan: cancelPlan() };
+  }
+
   #requestAction(
     merchantId: string,
     paymentId: string,
-    type: Exclude<JobType, 'authorize'>,
+    type: ActionType,
     requestId: string | null,
     inTx: InTransaction<PaymentView> | undefined,
-    plan: (p: Payment) => { amountMinor: number | null; nextStatus: PaymentStatus } | null,
+    plan: ActionPlan,
   ): Promise<PaymentView> {
     const now = isoNow(this.clock);
     return this.db.transact(merchantId, (d) => {
       const p = findPayment(d, paymentId);
-      const planned = p.pendingAction ? null : plan(p);
-      if (!planned) throw new InvalidStateError(`Cannot ${type} a payment with status "${p.status}"`);
-      const job = newJob(merchantId, p.id, type, planned.amountMinor, now, requestId);
-      d.jobs[job.id] = job;
-      p.pendingAction = { type, amountMinor: planned.amountMinor, jobId: job.id, previousStatus: p.status, requestedAt: now };
-      p.status = planned.nextStatus;
-      p.updatedAt = now;
+      this.#applyAction(d, p, type, requestId, now, plan);
       const view = toPaymentView(p);
       inTx?.(d, view);
       return view;
     });
   }
+
+  /**
+   * Shared shape of capture/refund/cancel (and PATCH status): state check (409), amount check (400),
+   * queue a job, move to the transitional status. One pending action at a time. Runs in the caller's transaction.
+   */
+  #applyAction(d: MerchantData, p: Payment, type: ActionType, requestId: string | null, now: string, plan: ActionPlan): void {
+    const planned = p.pendingAction ? null : plan(p);
+    if (!planned) throw new InvalidStateError(`Cannot ${type} a payment with status "${p.status}"`);
+    const job = newJob(p.merchantId, p.id, type, planned.amountMinor, now, requestId);
+    d.jobs[job.id] = job;
+    p.pendingAction = { type, amountMinor: planned.amountMinor, jobId: job.id, previousStatus: p.status, requestedAt: now };
+    p.status = planned.nextStatus;
+    p.updatedAt = now;
+  }
 }
+
+// ---------------------------------------------------------------- action rules (shared by the action endpoints and PATCH status)
+
+type ActionType = Exclude<JobType, 'authorize'>;
+type ActionPlan = (p: Payment) => { amountMinor: number | null; nextStatus: PaymentStatus } | null;
+
+/** The only statuses PATCH accepts, each produced by the matching action. */
+export const STATUS_UPDATES = ['captured', 'refunded', 'cancelled'] as const;
+export type StatusUpdate = (typeof STATUS_UPDATES)[number];
+
+export interface PaymentUpdate {
+  description?: string | null | undefined;
+  metadata?: Record<string, string | null> | undefined;
+  status?: StatusUpdate | undefined;
+  /** Only with status captured/refunded: partial capture/refund, as on the action endpoints. */
+  amountMinor?: number | undefined;
+}
+
+export interface PaymentUpdateResult {
+  payment: PaymentView;
+  /** True when a status change was queued: the route answers 202 like the action endpoints. */
+  statusChangeRequested: boolean;
+}
+
+const capturePlan =
+  (amountMinor: number | undefined): ActionPlan =>
+  (p) => {
+    if (p.status !== 'authorized') return null;
+    const toCapture = amountMinor ?? p.amountMinor;
+    if (toCapture > p.amountMinor) {
+      throw new ValidationError([{ field: 'amountMinor', message: `cannot exceed the authorized amount (${p.amountMinor} in minor units)` }]);
+    }
+    return { amountMinor: toCapture, nextStatus: 'capturing' };
+  };
+
+const refundPlan =
+  (amountMinor: number | undefined): ActionPlan =>
+  (p) => {
+    if (p.status !== 'captured' && p.status !== 'partially_refunded') return null;
+    const refundable = p.amountCapturedMinor - p.amountRefundedMinor;
+    const toRefund = amountMinor ?? refundable;
+    if (toRefund > refundable) {
+      throw new ValidationError([{ field: 'amountMinor', message: `cannot exceed the refundable amount (${refundable} in minor units)` }]);
+    }
+    return { amountMinor: toRefund, nextStatus: 'refunding' };
+  };
+
+const cancelPlan = (): ActionPlan => (p) => (p.status === 'authorized' ? { amountMinor: null, nextStatus: 'cancelling' } : null);
 
 export function findPayment(d: MerchantData, paymentId: string): Payment {
   const p = getOwn(d.payments, paymentId);

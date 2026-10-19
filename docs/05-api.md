@@ -313,15 +313,39 @@ Errors: `400` validation · `400` token expired or already used · `404` unknown
 
 ### `PATCH /payments/:id`
 
-Request (at least one field):
+Updates the description and metadata, and/or changes the status. Send at least one of `description`, `metadata`, `status`.
+
+**Description and metadata**
 
 ```json
 { "description": "Order #1042 (gift)", "metadata": { "giftWrap": "yes", "orderId": null } }
 ```
 
 - `metadata` is **merged** into the existing metadata. Setting a key to `null` deletes it.
-- Any other field (`amountMinor`, `status`, …) → `400` naming the field.
-- Emits `payment.updated`. Response `200` with the payment.
+- Allowed in every status. Emits `payment.updated`. Response **`200`** with the payment.
+
+**Status** ⚠️ *added to meet the project requirement*
+
+The project requires that a payment's status can be updated through `PATCH`. The original design deliberately allowed status changes only through the action endpoints (see the note below). To meet the requirement **without** creating a way around the state machine, `status` accepts exactly three values, and each one **runs the same logic as the matching action endpoint**:
+
+| `"status"` | Does exactly what this endpoint does | Allowed when the payment is | Response |
+|---|---|---|---|
+| `"captured"` | `POST /payments/{id}/capture` | `authorized` | `202`, status `capturing`, then `captured` |
+| `"refunded"` | `POST /payments/{id}/refund` | `captured` or `partially_refunded` | `202`, status `refunding`, then `refunded` / `partially_refunded` |
+| `"cancelled"` | `POST /payments/{id}/cancel` | `authorized` | `202`, status `cancelling`, then `cancelled` |
+
+```json
+{ "status": "refunded", "amountMinor": 500 }
+```
+
+- **Any other value** (`pending`, `authorized`, `failed`, `partially_refunded`, `capturing`, …) → `400` naming the three allowed values.
+- **Not allowed from the current status**, or another action still in flight → `409 invalid_state`, the same as the action endpoint.
+- **`amountMinor`** (optional, minor units) only with `"captured"` or `"refunded"`, for a partial capture or refund. The same bounds apply (≤ authorized amount / ≤ refundable amount). Sent without a status, or with `"cancelled"` → `400`.
+- Like the action endpoints, the change is **asynchronous**. The response is `202` with the transitional status (`capturing`, `refunding`, `cancelling`), and the final status arrives by webhook (`payment.captured`, …) or by polling.
+- `status` can be combined with `description`/`metadata`. Everything in the request is applied **together, in one transaction**: if the status change is rejected, the description and metadata aren't changed either.
+- Supports `Idempotency-Key`, so a retried status change replays the original `202` instead of failing with `409`.
+
+**Why status changes map onto the actions instead of setting the field:** writing the status directly would let a client mark a payment `refunded` without any money moving, or skip from `authorized` to `refunded` without a capture. Mapping each allowed value to its action keeps every rule: valid transitions only, amount bounds, one pending action at a time, the processor call, and the webhooks. `PATCH {"status":"captured"}` and `POST /payments/{id}/capture` are interchangeable; both are kept, because the action endpoints are clearer for capture/refund/cancel-only clients.
 
 **Why merge instead of replace:** two systems can each manage their own metadata keys without overwriting each other's.
 
@@ -503,6 +527,7 @@ These are API-level tests: the real app over HTTP. Payment states are tested in 
 | Test | Checks | Edge case guarded |
 |---|---|---|
 | `PATCH` metadata merge: `null` deletes, new keys are added, existing keys are overwritten. A merge that would exceed 20 keys → 400. Empty body → 400 | Merge rules | The 20-key cap bypassed through repeated merges |
+| `PATCH` `status`: `captured` / `refunded` (with or without `amountMinor`) / `cancelled` → `202` and the same outcome as the action endpoint; any other value → 400; over-capture/over-refund → 400; `PATCH` status racing `POST /refund` → exactly one accepted; a retried `PATCH` with the same `Idempotency-Key` → replayed `202`, one job | Status updates through `PATCH` (project requirement) behave exactly like the actions | A second, looser path for changing status |
 | `GET /payments?status=…&customerId=…` filters correctly, and combined filters intersect | Filters | – |
 | 6th webhook endpoint → `409 conflict`; deleting one frees a slot | Endpoint limit of 5 | Write amplification from unlimited endpoints |
 | Same URL registered twice, or `PATCH`ed onto another endpoint's URL → `409` naming the existing endpoint; case, default port and `#fragment` variants are also `409`; a different path, query or trailing slash is allowed; a disabled endpoint still holds its URL; 5 simultaneous registrations → exactly one `201`; another merchant may use the same URL | URL uniqueness per merchant | Every event delivered twice to the same receiver |
