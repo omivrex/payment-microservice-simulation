@@ -17,6 +17,7 @@ A Node.js/TypeScript microservice that **simulates** card payment processing. Me
 ```bash
 yarn install
 yarn gen:secrets          # creates .env (from .env.example) with placeholder secrets filled in
+yarn dev
 ```
 
 The generated `ENCRYPTION_KEYS` and `HASHING_SECRET` are **placeholders**: random values that are fine for local use. Replace them with your own random values before any shared or production use (`openssl rand -base64 32` gives a valid value). They must be base64-encoded: exactly 32 bytes for an encryption key, at least 32 bytes for the hashing secret. Re-running the script keeps existing keys (`yarn gen:secrets --force` replaces them, which makes existing encrypted data unreadable). It also adds any settings introduced since your `.env` was created, commented out with their defaults, so **re-run `yarn gen:secrets` after pulling changes** to see new options. Your values are never changed.
@@ -34,6 +35,23 @@ yarn build && yarn start  # compiled
 The server reads `.env` automatically. Data is stored in `data/db.json` (`DB_FILE`). Only one instance can use a database file at a time: a second instance refuses to start.
 
 **Run it under a process supervisor** (systemd, pm2, or a container restart policy). After an unexpected error the service logs a `fatal` line and exits with code 1 on purpose, and restarting is safe.
+
+## How this meets the brief
+
+| Requirement | Where | Tests |
+|---|---|---|
+| Express server | [src/app.ts](src/app.ts), [src/server.ts](src/server.ts) | `test/process/server.test.ts` |
+| Create a payment (POST) | `POST /payments` → [src/modules/payments/routes.ts](src/modules/payments/routes.ts) | `test/api/payments.test.ts` › *POST /payments* |
+| Retrieve a payment by ID (GET) | `GET /payments/:id` | `test/api/payments.test.ts` › *listing and isolation* |
+| Update a payment's status (PATCH) | `PATCH /payments/:id` with `status`: `captured`, `refunded` or `cancelled`. It goes through the same state machine as the action endpoints, so an invalid transition returns `409` | `test/api/payments.test.ts` › *PATCH status*, *state machine (every status × every action)* |
+| Asynchronous payment processing | Create returns `202` with status `pending`. A background worker calls the simulated processor, with retries, backoff, a time limit per call and leases → [src/workers/paymentWorker.ts](src/workers/paymentWorker.ts) | `test/integration/paymentWorker.test.ts` |
+| File-based JSON persistence | [src/db/jsonDb.ts](src/db/jsonDb.ts): queued all-or-nothing transactions, crash-safe writes (temp file, then rename), single-process lock | `test/integration/jsonDb.test.ts` |
+| Proper error responses | One shape, `{ error: { code, message, details?, requestId } }`, for 400/401/403/404/409/413/422/429/500/503 → [src/http/middleware/errorHandler.ts](src/http/middleware/errorHandler.ts) | `test/api/foundation.test.ts`, plus 4xx cases in every API test file |
+| Logging | Structured JSON logs; card data and secrets are redacted → [src/logging/](src/logging/) | `test/unit/logger.test.ts`, `test/unit/redact.test.ts` |
+| Unit tests | Unit, integration, API and process tests, using Node's built-in `node:test` so there is no test framework to install ([why](docs/09-testing.md)) | `yarn test` (see [Commands](#commands)) |
+| API documentation | Swagger UI at `/docs`, `/openapi.json`, and [docs/05-api.md](docs/05-api.md) | `test/api/foundation.test.ts` › *every registered route is documented* |
+
+**Beyond the brief, on purpose:** merchants and API keys, card tokens and saved cards (encrypted), signed webhooks, idempotency keys and rate limits. Each one makes the simulation behave like a real payment gateway, and the reasons are given in [docs/](docs/README.md).
 
 ## Commands
 
