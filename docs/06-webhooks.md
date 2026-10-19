@@ -148,7 +148,7 @@ yarn dev
 
 Without this setting, registering an `http://` or `localhost` URL is rejected with `400` ("must use https", or "must not point to a private, loopback or reserved address"). That's the SSRF protection from [Security §4.8](04-security.md#48-ssrf-protection-for-webhook-urls). **Never enable it in production.**
 
-**2. Start a receiver.** The [README walkthrough (step 2)](../README.md#manual-walkthrough-curl) has a short receiver script you can paste into a terminal. It prints the URL it listens on, for example:
+**2. Start a receiver.** The [README walkthrough (Receive webhooks)](../README.md#4-receive-webhooks-optional) has a short receiver script you can paste into a terminal. It prints the URL it listens on, for example:
 
 ```
 Receiver listening on http://localhost:4000/webhooks/payments

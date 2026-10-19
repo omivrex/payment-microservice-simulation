@@ -1,84 +1,87 @@
 # Payment Service (simulator)
 
-A Node.js/TypeScript microservice that **simulates** card payment processing. Merchants sign up, get API keys, tokenize and save cards, and create payments that are processed **asynchronously** by a background worker. Every state change is delivered to the merchant's endpoints as a **signed webhook**. All data lives in a single **JSON file**, with transactional (ACID-like) writes.
+A Node.js/TypeScript microservice that **simulates** card payment processing. Clients create payments through a REST API, a background worker processes them **asynchronously** against a simulated card processor, and every status change is recorded and sent to the merchant as a **signed webhook**. All data lives in a single **JSON file**, written with transactional (ACID-like) guarantees.
 
-> Simulation only: no real card network is involved, and nothing here is PCI DSS certified. Merchant sign-up is **intentionally open**, because user authentication is out of scope (see [docs/README.md](docs/README.md)).
+> Simulation only: no real card network is involved, and nothing here is PCI DSS certified. Merchant sign-up is **intentionally open**, because user authentication is out of scope (see [docs/README.md](docs/README.md#intentional-decision-open-merchant-sign-up)).
 
-- **Design docs:** [docs/](docs/README.md) (architecture, data model, lifecycle, security, API, webhooks, persistence, error handling, testing)
-- **Interactive API docs:** `http://localhost:3000/docs` (Swagger UI) and `/openapi.json`, once the server is running
+## Core features
 
-## Requirements
+| Feature | Where | Tests |
+|---|---|---|
+| Express server | [src/app.ts](src/app.ts), [src/server.ts](src/server.ts) | `test/process/server.test.ts` |
+| Create a payment | `POST /payments` → [src/modules/payments/](src/modules/payments/) | `test/api/payments.test.ts` › *POST /payments* |
+| Retrieve a payment by ID | `GET /payments/:id` | `test/api/payments.test.ts` › *listing and isolation* |
+| Update a payment's status | `PATCH /payments/:id` with `status`: `captured`, `refunded` or `cancelled`. It goes through the same state machine as the action endpoints, so an invalid transition returns `409` | `test/api/payments.test.ts` › *PATCH status*, *state machine (every status × every action)* |
+| Asynchronous payment processing | Create returns `202` with status `pending`. A background worker calls the simulated processor, with retries, backoff, a time limit per call and leases → [src/workers/paymentWorker.ts](src/workers/paymentWorker.ts) | `test/integration/paymentWorker.test.ts` |
+| File-based JSON persistence | [src/db/jsonDb.ts](src/db/jsonDb.ts): queued all-or-nothing transactions, crash-safe writes (temp file, then rename), single-process lock | `test/integration/jsonDb.test.ts` |
+| Error responses | One shape for every error (see [Errors](#errors)) → [src/http/middleware/errorHandler.ts](src/http/middleware/errorHandler.ts) | `test/api/foundation.test.ts`, plus 4xx cases in every API test file |
+| Logging | Structured JSON logs; card data and secrets are redacted → [src/logging/](src/logging/) | `test/unit/logger.test.ts`, `test/unit/redact.test.ts` |
+| API documentation | Swagger UI at `/docs`, `/openapi.json`, and [docs/05-api.md](docs/05-api.md) | `test/api/foundation.test.ts` › *every registered route is documented* |
 
-- Node.js **≥ 22.3**
-- yarn 1.x
+**Beyond the core, on purpose:** merchants and API keys, card tokens and saved cards (encrypted), signed webhooks, idempotency keys and rate limits. Each one makes the simulation behave like a real payment gateway; the reasons are given in [docs/](docs/README.md).
 
-## Setup
+## Getting started
+
+**Prerequisites:** Node.js **≥ 22.3** and yarn 1.x.
 
 ```bash
 yarn install
-yarn gen:secrets          # creates .env (from .env.example) with placeholder secrets filled in
-yarn dev
+yarn gen:secrets                # creates .env from .env.example, with placeholder secrets filled in
+yarn dev                        # watch mode; or: yarn build && yarn start
 ```
 
-The generated `ENCRYPTION_KEYS` and `HASHING_SECRET` are **placeholders**: random values that are fine for local use. Replace them with your own random values before any shared or production use (`openssl rand -base64 32` gives a valid value). They must be base64-encoded: exactly 32 bytes for an encryption key, at least 32 bytes for the hashing secret. Re-running the script keeps existing keys (`yarn gen:secrets --force` replaces them, which makes existing encrypted data unreadable). It also adds any settings introduced since your `.env` was created, commented out with their defaults, so **re-run `yarn gen:secrets` after pulling changes** to see new options. Your values are never changed.
+The server listens on `http://localhost:3000` and stores its data in `data/db.json`. Only one instance can use a database file at a time; a second one refuses to start.
 
-For local webhook testing against `http://localhost`, add `WEBHOOK_ALLOW_INSECURE_URLS=true` to `.env`. Never set it in production. All variables are listed in [docs/01-architecture.md §1.6](docs/01-architecture.md#16-configuration).
+The secrets `gen:secrets` writes are random placeholders, fine for local use. Replace them before any shared use (`openssl rand -base64 32`). Re-run `yarn gen:secrets` after pulling changes: it adds new settings to your `.env` without touching your values. Every setting is listed in [docs/01-architecture.md §1.6](docs/01-architecture.md#16-configuration).
 
-## Run
+## API overview
 
-```bash
-yarn dev                  # watch mode (tsx)
-# or
-yarn build && yarn start  # compiled
-```
+The full reference, with every endpoint, field and response, is the **Swagger UI at [`/docs`](http://localhost:3000/docs)** (or [`/openapi.json`](http://localhost:3000/openapi.json)) while the server is running, and [docs/05-api.md](docs/05-api.md). This section covers what you need to know before using it.
 
-The server reads `.env` automatically. Data is stored in `data/db.json` (`DB_FILE`). Only one instance can use a database file at a time: a second instance refuses to start.
+### Resources
 
-**Run it under a process supervisor** (systemd, pm2, or a container restart policy). After an unexpected error the service logs a `fatal` line and exits with code 1 on purpose, and restarting is safe.
-
-## How this meets the brief
-
-| Requirement | Where | Tests |
-|---|---|---|
-| Express server | [src/app.ts](src/app.ts), [src/server.ts](src/server.ts) | `test/process/server.test.ts` |
-| Create a payment (POST) | `POST /payments` → [src/modules/payments/routes.ts](src/modules/payments/routes.ts) | `test/api/payments.test.ts` › *POST /payments* |
-| Retrieve a payment by ID (GET) | `GET /payments/:id` | `test/api/payments.test.ts` › *listing and isolation* |
-| Update a payment's status (PATCH) | `PATCH /payments/:id` with `status`: `captured`, `refunded` or `cancelled`. It goes through the same state machine as the action endpoints, so an invalid transition returns `409` | `test/api/payments.test.ts` › *PATCH status*, *state machine (every status × every action)* |
-| Asynchronous payment processing | Create returns `202` with status `pending`. A background worker calls the simulated processor, with retries, backoff, a time limit per call and leases → [src/workers/paymentWorker.ts](src/workers/paymentWorker.ts) | `test/integration/paymentWorker.test.ts` |
-| File-based JSON persistence | [src/db/jsonDb.ts](src/db/jsonDb.ts): queued all-or-nothing transactions, crash-safe writes (temp file, then rename), single-process lock | `test/integration/jsonDb.test.ts` |
-| Proper error responses | One shape, `{ error: { code, message, details?, requestId } }`, for 400/401/403/404/409/413/422/429/500/503 → [src/http/middleware/errorHandler.ts](src/http/middleware/errorHandler.ts) | `test/api/foundation.test.ts`, plus 4xx cases in every API test file |
-| Logging | Structured JSON logs; card data and secrets are redacted → [src/logging/](src/logging/) | `test/unit/logger.test.ts`, `test/unit/redact.test.ts` |
-| Unit tests | Unit, integration, API and process tests, using Node's built-in `node:test` so there is no test framework to install ([why](docs/09-testing.md)) | `yarn test` (see [Commands](#commands)) |
-| API documentation | Swagger UI at `/docs`, `/openapi.json`, and [docs/05-api.md](docs/05-api.md) | `test/api/foundation.test.ts` › *every registered route is documented* |
-
-**Beyond the brief, on purpose:** merchants and API keys, card tokens and saved cards (encrypted), signed webhooks, idempotency keys and rate limits. Each one makes the simulation behave like a real payment gateway, and the reasons are given in [docs/](docs/README.md).
-
-## Commands
-
-| Command | What it does |
+| Resource | Purpose |
 |---|---|
-| `yarn test` | All automated tests (unit, integration, API, process) |
-| `yarn test:unit` · `test:integration` · `test:api` · `test:process` | One test level |
-| `yarn test:coverage` | Tests with a coverage report |
-| `yarn smoke` | Starts the **real server** on a random port with a temp database and runs every smoke scenario against it, including attempts to break it |
-| `yarn smoke payments` | One scenario (prerequisites are added automatically) |
-| `PROCESSOR_FAILURE_RATE=0.3 yarn smoke` | Chaos mode: 30% random processor failures |
-| `yarn bench:db` | Measures database commit time at 1k / 10k / 50k payments |
-| `yarn reencrypt` | Re-encrypts stored data with the active key (master-key rotation step; stop the server first) |
-| `yarn typecheck` | TypeScript check |
+| `/merchants` | Sign up (no key needed). Returns the merchant and its first API keys |
+| `/api-keys` | List keys and rotate them (the old key stops working immediately) |
+| `/tokens` | Turn card details into a single-use token, using the publishable key, as a browser would |
+| `/cards` | Save, list and delete cards (stored encrypted) |
+| `/payments` | Create, list, retrieve and update payments; capture, refund and cancel them |
+| `/webhooks` | Register endpoints that receive payment events, and view their delivery log |
+| `/events` | Every event the service has recorded, for catching up on missed webhooks |
+| `/health` | Liveness check |
 
-What each smoke scenario covers (happy paths and the edge cases it attacks) is listed in [docs/09-testing.md §9.8](docs/09-testing.md#98-smoke-tests).
+### Authentication
 
-## Manual walkthrough (curl)
+Send an API key as `Authorization: Bearer <key>`. Each merchant has two:
 
-**Before you start:** add these two lines to `.env`, then start the server with `yarn dev`.
+- **Secret key (`sk_test_…`)**: for servers; allowed everywhere.
+- **Publishable key (`pk_test_…`)**: safe to put in a browser; it can only create card tokens.
 
-```bash
-WEBHOOK_ALLOW_INSECURE_URLS=true   # lets you register http://localhost webhook URLs (local development only)
-PROCESSOR_LATENCY_MS=300
+### Payments
+
+- **Processing is asynchronous.** Creating a payment, and every capture, refund or cancel, returns `202` with a transitional status. The final status arrives by webhook, or by polling `GET /payments/:id`.
+- **Statuses:** `pending` → `authorized` → `captured` → `partially_refunded` / `refunded`. By default a payment is captured as soon as it is authorized; with `"captureMethod":"manual"` it waits in `authorized` until you capture or cancel it. A declined payment ends `failed`. While an action runs, the status is `capturing`, `refunding` or `cancelling`.
+- **Amounts are in minor units.** `amountMinor` is an integer in the currency's smallest unit: `2500` USD = $25.00, `1050` EUR = €10.50, and `2500` JPY = ¥2500 (JPY has no minor unit). Decimals are rejected.
+- **Idempotency:** send an `Idempotency-Key` header on create, capture, refund, cancel or PATCH. A retry with the same key and body replays the original response; the same key with a different body returns `422`.
+
+### Errors
+
+Every error has the same shape:
+
+```json
+{ "error": { "code": "invalid_state", "message": "Cannot refund a payment with status \"pending\"", "requestId": "req_…" } }
 ```
 
-**1. Sign up** (no key needed) and save the keys:
+Validation errors (`400`) add a `details` array naming each field. Main status codes: `400` invalid input · `401` bad API key · `403` wrong key type · `404` not found · `409` not allowed in the current status · `422` idempotency key reused · `429` rate limited · `500` unexpected error (details only in the logs, matched by `requestId`) · `503` storage unavailable.
+
+## Walkthrough
+
+With the server running (`yarn dev`), these `curl` commands go through the main flow. Replace the `…` placeholders with values from the previous responses.
+
+### 1. Make a payment
+
+**Sign up** and keep both keys from `apiKeys`:
 
 ```bash
 curl -s -X POST localhost:3000/merchants -H 'content-type: application/json' \
@@ -87,9 +90,56 @@ export SK=sk_test_...   # apiKeys.secret
 export PK=pk_test_...   # apiKeys.publishable
 ```
 
-**2. Start a webhook receiver and register its URL.**
+**Tokenize a card** with the publishable key, as a browser would:
 
-**a) Start the receiver** in a second terminal. It's a small script that prints every event it receives:
+```bash
+curl -s -X POST localhost:3000/tokens -H "authorization: Bearer $PK" -H 'content-type: application/json' \
+  -d '{"card":{"number":"4242 4242 4242 4242","expMonth":12,"expYear":2030,"cvc":"123"}}'
+```
+
+**Pay** with the token. This returns `202` with status `pending`:
+
+```bash
+curl -s -X POST localhost:3000/payments -H "authorization: Bearer $SK" -H 'content-type: application/json' \
+  -H 'Idempotency-Key: order-1' -d '{"amountMinor":2500,"currency":"usd","token":"tok_..."}'
+```
+
+**Retrieve it** a couple of seconds later. The worker authorizes and then captures it, so the status goes `pending` → `capturing` → `captured`. Wait for `captured` before the next step:
+
+```bash
+curl -s localhost:3000/payments/pay_... -H "authorization: Bearer $SK"
+```
+
+### 2. Update its status
+
+**Refund part of it** by updating its status. This returns `202` with status `refunding`, which becomes `partially_refunded`:
+
+```bash
+curl -s -X PATCH localhost:3000/payments/pay_... -H "authorization: Bearer $SK" -H 'content-type: application/json' \
+  -d '{"status":"refunded","amountMinor":1000}'
+```
+
+**Refund the rest** with the equivalent action endpoint. The status becomes `refunded`:
+
+```bash
+curl -s -X POST localhost:3000/payments/pay_.../refund -H "authorization: Bearer $SK"
+```
+
+### 3. Things that should fail cleanly
+
+- refund more than was captured → `400`;
+- cancel a `pending` payment → `409`;
+- resend the payment request with the same `Idempotency-Key` → the original payment is replayed, not charged again;
+- the same key with a different amount → `422`;
+- use `$PK` on `/payments` → `403`;
+- rotate the secret key (`POST /api-keys/rotate` with `{"type":"secret"}`), then reuse the old one → `401`;
+- pay with one of the declining [test cards](#test-cards) → the payment ends `failed` with that card's code.
+
+### 4. Receive webhooks (optional)
+
+Webhook URLs must normally be public `https` addresses. For local testing, add `WEBHOOK_ALLOW_INSECURE_URLS=true` to `.env` and restart the server. **Never set it in production.**
+
+**Start a receiver** in a second terminal. This small script prints every event it receives:
 
 <!-- webhook-receiver -->
 ```bash
@@ -130,65 +180,22 @@ const isTaken = (host) => new Promise((resolve) => {
 '
 ```
 
-It prints `Receiver listening on http://localhost:4000/webhooks/payments`. **That printed URL is the one to register.**
+It prints the URL it listens on, by default `http://localhost:4000/webhooks/payments`. Set `PORT` or `WEBHOOK_PATH` before `node` to change it; if the port is taken, the receiver refuses to start and says so.
 
-The path and port are your choice. To use a different path, set it before `node`, for example `WEBHOOK_PATH=/api/pms/payment PORT=5000 node -e '…'`. The receiver then prints `http://localhost:5000/api/pms/payment`. If the port is already used by another program, the receiver refuses to start and says so (otherwise deliveries would silently go to that program and get `404`). Start it on a free port with `PORT`, and register the URL it prints.
-
-**b) Register the URL** the receiver printed:
+**Register the printed URL.** It must match exactly, because the service posts to exactly the URL you register:
 
 ```bash
 curl -s -X POST localhost:3000/webhooks -H "authorization: Bearer $SK" -H 'content-type: application/json' \
   -d '{"url":"http://localhost:4000/webhooks/payments","events":["*"]}'
 ```
 
-**The registered URL must match the receiver's path exactly.** The service POSTs to exactly the URL you register. If the paths differ, the receiver answers `404` and prints the path it actually received. To fix a mismatch, `PATCH /webhooks/{id}` with the right `url`. Each URL can be registered only **once** per merchant (registering it again → `409`), and a merchant can have at most **5** endpoints.
-
-From the response, keep `id` (`we_…`), which you'll need for the delivery log, and `secret` (`whsec_…`), which is **shown only once** and is needed to verify signatures (see [Verifying webhooks](#verifying-webhooks)). More detail and a troubleshooting table: [docs/06-webhooks.md §6.6](docs/06-webhooks.md#66-receiving-and-verifying-webhooks).
-
-**3. Tokenize a card** with the *publishable* key, which is what a browser would do:
-
-```bash
-curl -s -X POST localhost:3000/tokens -H "authorization: Bearer $PK" -H 'content-type: application/json' \
-  -d '{"card":{"number":"4242 4242 4242 4242","expMonth":12,"expYear":2030,"cvc":"123"}}'
-```
-
-**4. Pay** with the token. This returns `202` with status `pending`.
-
-> **Amounts are in minor units.** `amountMinor` is an integer in the currency's smallest unit: `2500` with `usd` = **$25.00**, `1050` with `eur` = €10.50. JPY has no minor unit, so `2500` with `jpy` = ¥2500. Decimals such as `25.00` are rejected. Every amount field in responses and webhooks (`amountMinor`, `amountCapturedMinor`, `amountRefundedMinor`) uses the same unit.
-
-
-```bash
-curl -s -X POST localhost:3000/payments -H "authorization: Bearer $SK" -H 'content-type: application/json' \
-  -H 'Idempotency-Key: order-1' -d '{"amountMinor":2500,"currency":"usd","token":"tok_..."}'
-```
-
-Within about a second the receiver prints `payment.created`, `payment.authorized` and `payment.captured` lines. If nothing arrives, check the delivery log: its `lastResponseStatus` and `lastError` say why (see the troubleshooting table in [§6.6](docs/06-webhooks.md#66-receiving-and-verifying-webhooks)):
+The response includes `secret` (`whsec_…`), **shown only once**, which a real receiver uses to verify the `Webhook-Signature` header. Make another payment, and the receiver prints `payment.created`, `payment.authorized` and `payment.captured`. If nothing arrives, the delivery log says why:
 
 ```bash
 curl -s localhost:3000/webhooks/we_.../deliveries -H "authorization: Bearer $SK"
 ```
 
-Poll the payment:
-
-```bash
-curl -s localhost:3000/payments/pay_... -H "authorization: Bearer $SK"
-```
-
-**5. Refund** part of it, then the rest:
-
-```bash
-curl -s -X POST localhost:3000/payments/pay_.../refund -H "authorization: Bearer $SK" -H 'content-type: application/json' -d '{"amountMinor":1000}'
-curl -s -X POST localhost:3000/payments/pay_.../refund -H "authorization: Bearer $SK"
-```
-
-**6. Things to try that should fail cleanly:**
-- refund more than was captured → `400`;
-- cancel a `pending` payment → `409`;
-- resend step 4 with the same `Idempotency-Key` → the same payment is replayed;
-- the same key with a different amount → `422`;
-- use `$PK` on `/payments` → `403`;
-- rotate the secret key (`POST /api-keys/rotate {"type":"secret"}`), then reuse the old key → `401`;
-- create a payment with a raw `card` and the test number `4000000000000002` → it ends `failed` / `card_declined`.
+Signature verification code, a complete receiver and a troubleshooting table are in [docs/06-webhooks.md §6.6](docs/06-webhooks.md#66-receiving-and-verifying-webhooks).
 
 ### Test cards
 
@@ -199,16 +206,48 @@ curl -s -X POST localhost:3000/payments/pay_.../refund -H "authorization: Bearer
 | `4000 0000 0000 9995` | `insufficient_funds` |
 | `4000 0000 0000 0069` | `expired_card` |
 | `4000 0000 0000 0127` | `incorrect_cvc` |
-| `4000 0000 0000 0119` | `processing_error`: retried for ~30 s, then `failed` |
+| `4000 0000 0000 0119` | `processing_error`: retried for about 30 s, then `failed` |
 
-## Verifying webhooks
+## Testing
 
-The receiver above only prints events. A real receiver must also verify the `Webhook-Signature` header using the endpoint's `whsec_` secret (no API key needed). [docs/06-webhooks.md §6.6](docs/06-webhooks.md#66-receiving-and-verifying-webhooks) has the verification code and a complete Express receiver.
+Tests use Node's built-in test runner (`node:test`), so there is no test framework to install. The reasons, the strategy and the per-module test plans are in [docs/09-testing.md](docs/09-testing.md).
 
-## Logs
+| Command | What it does |
+|---|---|
+| `yarn test` | All automated tests |
+| `yarn test:unit` · `test:integration` · `test:api` · `test:process` | One level: pure functions · the database and workers · HTTP endpoints · the real server process |
+| `yarn test:coverage` | All tests, with a coverage report |
+| `yarn smoke` | Starts the real server on a random port with a temporary database and runs every scenario against it, including attempts to break it. `yarn smoke payments` runs one scenario |
+| `PROCESSOR_FAILURE_RATE=0.3 yarn smoke` | The same, with 30% random processor failures |
+| `yarn typecheck` | TypeScript check |
 
-One JSON line per entry on stdout/stderr (`warn`/`error`/`fatal` go to stderr), always with a `requestId`. Card numbers, CVCs, keys and secrets are redacted. To filter one request: `yarn start | jq 'select(.requestId=="req_...")'`.
+What each smoke scenario covers is listed in [docs/09-testing.md §9.8](docs/09-testing.md#98-smoke-tests).
 
-## Capacity
+## Operations
 
-Designed for about 2,000 payments (about 10 MB) in the worst case, with a warning logged above `DB_WARN_SIZE_MB`. The measurements and the upgrade path are in [docs/07-persistence.md §7.9–7.11](docs/07-persistence.md#79-performance-and-capacity).
+- **Logs:** one JSON line per entry on stdout (`warn`, `error` and `fatal` on stderr), always with a `requestId`. Card numbers, CVCs, keys and secrets are redacted. To follow one request: `yarn start | jq 'select(.requestId=="req_...")'`.
+- **Process supervisor:** after an unexpected error the service logs a `fatal` line and exits with code 1 on purpose. Run it under systemd, pm2 or a container restart policy; restarting is safe.
+- **Capacity:** designed for about 2,000 payments (about 10 MB) in the worst case, with a warning logged above `DB_WARN_SIZE_MB`. `yarn bench:db` measures commit time at 1k, 10k and 50k payments. The measurements and the upgrade path are in [docs/07-persistence.md §7.9–7.11](docs/07-persistence.md#79-performance-and-capacity).
+- **Master-key rotation:** `yarn reencrypt` re-encrypts stored data with the active key. Stop the server first.
+
+## Project layout
+
+```
+src/
+  server.ts, app.ts     entry point, Express app
+  config.ts             settings from environment variables
+  modules/              one folder per resource: routes (HTTP) + service (business logic)
+  workers/              payment worker, webhook dispatcher, housekeeping
+  processor/            the simulated card processor
+  db/                   the JSON file database
+  crypto/               encryption and hashing
+  http/                 middleware: auth, validation, idempotency, errors, rate limits
+  logging/              logger and redaction
+test/                   unit, integration, api and process tests
+scripts/                secrets generator, smoke tests, benchmark, re-encryption
+docs/                   design documentation
+```
+
+The design docs explain every decision and the alternatives considered. Start at [docs/README.md](docs/README.md):
+
+[Architecture](docs/01-architecture.md) · [Data model](docs/02-data-model.md) · [Payment lifecycle](docs/03-payment-lifecycle.md) · [Security](docs/04-security.md) · [API](docs/05-api.md) · [Webhooks](docs/06-webhooks.md) · [Persistence](docs/07-persistence.md) · [Error handling](docs/08-error-handling.md) · [Testing](docs/09-testing.md)
